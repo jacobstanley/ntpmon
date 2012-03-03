@@ -1,0 +1,25 @@
+name:                ntp-monitor
+version:             0.1
+synopsis:            Monitors NTP servers
+license:             BSD3
+license-file:        LICENSE
+author:              Jacob Stanley
+maintainer:          Jacob Stanley <jacob@stanley.io>
+copyright:           Jacob Stanley (c) 2012
+category:            Network
+build-type:          Simple
+Cabal-version:       >= 1.6
+
+executable ntp-monitor
+  main-is: Main.hs
+  hs-source-dirs: src
+
+  build-depends:
+      base == 4.*
+
+  ghc-options:
+    -O2 -Wall
+    -funbox-strict-fields
+    -fno-warn-unused-do-bind
+    -fno-warn-orphans
+    -fwarn-tabs
