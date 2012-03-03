@@ -15,7 +15,9 @@ executable ntp-monitor
   hs-source-dirs: src
 
   build-depends:
-      base == 4.*
+      base    == 4.*
+    , cereal  == 0.3.*
+    , network == 2.3.*
 
   ghc-options:
     -O2 -Wall

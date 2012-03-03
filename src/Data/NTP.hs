@@ -125,6 +125,9 @@ data NTPMsg = NTPMsg {
     -- | See 'Mode' for details.
     , ntpMode :: !Mode
 
+    -- | See 'Stratum' for details.
+    , ntpStratum :: !Stratum
+
     -- | This is an 8-bit signed integer indicating the maximum interval
     -- between successive messages, in seconds to the nearest power of
     -- two. The values that can appear in this field presently range
@@ -180,6 +183,7 @@ data NTPMsg = NTPMsg {
 instance Serialize NTPMsg where
     put NTPMsg {..} = do
         putLVM      ntpLeapIndicator ntpVersion ntpMode
+        putWord8    ntpStratum
         putWord8    ntpPoll
         putWord8    ntpPrecision
         putWord32be ntpRootDelay
@@ -191,6 +195,7 @@ instance Serialize NTPMsg where
         put         ntpTransmitTime
     get = do
         (ntpLeapIndicator, ntpVersion, ntpMode) <- getLVM
+        ntpStratum        <- getWord8
         ntpPoll           <- getWord8
         ntpPrecision      <- getWord8
         ntpRootDelay      <- getWord32be
