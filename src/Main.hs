@@ -5,11 +5,17 @@
 module Main where
 
 import Control.Applicative ((<$>))
+import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
+import Control.Monad (forever)
+import Data.List (intercalate)
 import Data.Serialize
 import Data.Time.Clock
+import Data.Time.Format
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
+import System.CPUTime.Rdtsc (rdtsc)
+import System.Locale (defaultTimeLocale)
 import Text.Printf (printf)
 
 import Data.NTP
@@ -17,11 +23,12 @@ import Data.NTP
 ------------------------------------------------------------------------
 
 servers :: [HostName]
-servers = [ "localhost"
-          , "0.au.pool.ntp.org"
-          , "1.au.pool.ntp.org"
-          , "2.au.pool.ntp.org"
-          , "3.au.pool.ntp.org"
+servers = --[ "localhost"
+          --, "0.au.pool.ntp.org"
+          --, "1.au.pool.ntp.org"
+          --, "2.au.pool.ntp.org"
+          --, "3.au.pool.ntp.org"
+          [ "203.82.209.217"
           ]
 
 resolveAddrs :: [HostName] -> IO [(HostName, SockAddr)]
@@ -29,22 +36,39 @@ resolveAddrs xs = concat . zipWith (zip . repeat) xs <$> mapM ntpAddrs xs
 
 main :: IO ()
 main = withSocketsDo $ do
-    putStrLn "NTP Monitor"
-
+    --putStrLn "NTP Monitor"
     addrs <- resolveAddrs servers
 
     bracket ntpSocket sClose $ \sock -> do
-    mapM_ (roundtrip sock) addrs
+    forever $ do
+        mapM_ (roundtrip sock) addrs
+        threadDelay 1000000
   where
     roundtrip :: Socket -> (HostName, SockAddr) -> IO ()
     roundtrip sock (host, addr) = do
         ereply <- ntpSend sock addr >> ntpRecv sock
         case ereply of
             Left err    -> putStrLn ("Error: " ++ err)
-            Right reply -> do
-                putStrLn (host ++ " (" ++ show addr ++ ")")
-                putStrLn ("Delay  = " ++ showMilli (roundtripDelay reply))
-                putStrLn ("Offset = " ++ showMilli (localClockOffset reply))
+            Right reply -> printCsv host addr reply
+
+printCsv :: HostName -> SockAddr -> NTPReply -> IO ()
+printCsv host addr reply = do
+    now <- getCurrentTime
+    index <- rdtsc
+
+    let offset = localClockOffset reply
+        delay  = roundtripDelay reply
+        ntp    = offset `addUTCTime` now
+        time   = formatTime defaultTimeLocale "%T.%q" ntp
+        csv    = intercalate ","
+                 [ host
+                 --, show addr
+                 , showMilli delay
+                 , showMilli offset
+                 , show index
+                 , time ]
+
+    putStrLn csv
 
 ------------------------------------------------------------------------
 

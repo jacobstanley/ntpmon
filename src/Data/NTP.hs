@@ -12,6 +12,7 @@ import Data.Bits ((.&.), shiftL, shiftR)
 import Data.Serialize
 import Data.Time.Calendar
 import Data.Time.Clock
+import Data.Time.Format ()
 import Data.Word (Word8, Word32)
 
 ------------------------------------------------------------------------
@@ -213,8 +214,6 @@ instance Serialize NTPMsg where
 
 ------------------------------------------------------------------------
 -- Serializing Timestamps
-
-deriving instance Show UTCTime
 
 -- | An NTP timestamp. On the wire, timestamps are represented as a
 -- 64-bit unsigned fixed-point number, in seconds relative to 1 January
