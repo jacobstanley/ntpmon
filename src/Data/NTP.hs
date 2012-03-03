@@ -1,4 +1,6 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | Most of the documentation for this module as been taken from
 -- RFC-2030 (http://tools.ietf.org/html/rfc2030) which describes the
@@ -6,9 +8,11 @@
 module Data.NTP where
 
 import Control.Applicative ((<$>), (<*>))
-import Data.Serialize
-import Data.Word (Word8, Word32)
 import Data.Bits ((.&.), shiftL, shiftR)
+import Data.Serialize
+import Data.Time.Calendar
+import Data.Time.Clock
+import Data.Word (Word8, Word32)
 
 ------------------------------------------------------------------------
 -- Types
@@ -107,13 +111,6 @@ type Stratum = Word8
 -- appropriate.
 type ReferenceId = Word32
 
--- | An NTP timestamp. On the wire, timestamps are represented as a
--- 64-bit unsigned fixed-point number, in seconds relative to 1 January
--- 1900. The integer part is in the first 32 bits and the fraction part
--- in the last 32 bits.
-data NTPTime = NTPTime !Word32 !Word32
-    deriving (Eq, Show)
-
 -- | An NTP message.
 data NTPMsg = NTPMsg {
     -- | See 'LeapIndicator' for details.
@@ -162,20 +159,27 @@ data NTPMsg = NTPMsg {
     , ntpReferenceId :: !Word32
 
     -- | The time at which the local clock was last set or corrected.
-    , ntpReferenceTime :: !NTPTime
+    , ntpReferenceTime :: UTCTime
 
     -- | /T1/ The time at which the request departed the client for the
     -- server.
-    , ntpOriginateTime :: !NTPTime
+    , ntpOriginateTime :: UTCTime
 
     -- | /T2/ The time at which the request arrived at the server.
-    , ntpReceiveTime :: !NTPTime
+    , ntpReceiveTime :: UTCTime
 
     -- | /T3/ The time at which the reply departed the server for the
     -- client.
-    , ntpTransmitTime :: !NTPTime
+    , ntpTransmitTime :: UTCTime
 
     } deriving (Eq, Show)
+
+------------------------------------------------------------------------
+-- Functions
+
+emptyNTPMsg :: NTPMsg
+emptyNTPMsg = NTPMsg NoWarning Version4 Client 0 0 0 0 0 0
+              ntpOrigin ntpOrigin ntpOrigin ntpOrigin
 
 ------------------------------------------------------------------------
 -- Serialize
@@ -189,10 +193,10 @@ instance Serialize NTPMsg where
         putWord32be ntpRootDelay
         putWord32be ntpRootDispersion
         putWord32be ntpReferenceId
-        put         ntpReferenceTime
-        put         ntpOriginateTime
-        put         ntpReceiveTime
-        put         ntpTransmitTime
+        putTime     ntpReferenceTime
+        putTime     ntpOriginateTime
+        putTime     ntpReceiveTime
+        putTime     ntpTransmitTime
     get = do
         (ntpLeapIndicator, ntpVersion, ntpMode) <- getLVM
         ntpStratum        <- getWord8
@@ -201,19 +205,54 @@ instance Serialize NTPMsg where
         ntpRootDelay      <- getWord32be
         ntpRootDispersion <- getWord32be
         ntpReferenceId    <- getWord32be
-        ntpReferenceTime  <- get
-        ntpOriginateTime  <- get
-        ntpReceiveTime    <- get
-        ntpTransmitTime   <- get
+        ntpReferenceTime  <- getTime
+        ntpOriginateTime  <- getTime
+        ntpReceiveTime    <- getTime
+        ntpTransmitTime   <- getTime
         return NTPMsg {..}
 
-instance Serialize NTPTime where
-    put (NTPTime int frac) = putWord32be int >> putWord32be frac
-    get = NTPTime <$> getWord32be <*> getWord32be
+------------------------------------------------------------------------
+-- Serializing Timestamps
 
+deriving instance Show UTCTime
+
+-- | An NTP timestamp. On the wire, timestamps are represented as a
+-- 64-bit unsigned fixed-point number, in seconds relative to 1 January
+-- 1900. The integer part is in the first 32 bits and the fraction part
+-- in the last 32 bits.
+data NTPTime = NTPTime !Word32 !Word32
+    deriving (Eq, Show)
+
+putTime :: Putter UTCTime
+putTime t = putWord32be int >> putWord32be frac
+  where
+    (NTPTime int frac) = fromUTC t
+
+getTime :: Get UTCTime
+getTime = toUTC <$> (NTPTime <$> getWord32be <*> getWord32be)
+
+fromUTC :: UTCTime -> NTPTime
+fromUTC = diff2ntp . (`diffUTCTime` ntpOrigin)
+  where
+    diff2ntp :: NominalDiffTime -> NTPTime
+    diff2ntp t = NTPTime int (truncate (frac * maxBound32))
+      where
+        (int, frac) = properFraction t
+
+toUTC :: NTPTime -> UTCTime
+toUTC = (`addUTCTime` ntpOrigin) . ntp2diff
+  where
+    ntp2diff :: NTPTime -> NominalDiffTime
+    ntp2diff (NTPTime int frac) = fromIntegral int + (fromIntegral frac / maxBound32)
+
+ntpOrigin :: UTCTime
+ntpOrigin = UTCTime (fromGregorian 1900 1 1) 0
+
+maxBound32 :: NominalDiffTime
+maxBound32 = fromIntegral (maxBound :: Word32)
 
 ------------------------------------------------------------------------
--- Packing and unpacking of the leap indicator / version / mode byte.
+-- Serializing the leap indicator / version / mode byte.
 
 putLVM :: LeapIndicator -> Version -> Mode -> Put
 putLVM l v m = putWord8 (packLVM l v m)
