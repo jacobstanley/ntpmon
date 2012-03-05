@@ -115,9 +115,12 @@ calcOffsets (x:xs) = (x, Just 0) : map go xs
              in (x', offset)
 
 timeAt :: Timestamp -> [Record] -> Maybe UTCTime
-timeAt i rs = case span ((> i) . fst) rs of
-    (r2:_, r1:_) -> Just (interp i r1 r2)
-    _            -> Nothing
+timeAt i rs =
+    if null r2 || null r1
+    then Nothing
+    else Just (interp i (head r1) (last r2))
+  where
+    (r2, r1) = span ((> i) . fst) rs
 
 interp :: Timestamp -> Record -> Record -> UTCTime
 interp i (i0, t0) (i1, t1) = t
