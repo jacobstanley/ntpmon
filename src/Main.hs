@@ -103,7 +103,7 @@ data NTPReply = NTPReply UTCTime NTPMsg
 roundtripDelay :: NTPReply -> NominalDiffTime
 roundtripDelay = go . timestamps
   where
-    go (t1,t2,t3,t4) = (t4 `diffUTCTime` t1) - (t2 `diffUTCTime` t3)
+    go (t1,t2,t3,t4) = (t4 `diffUTCTime` t1) - (t3 `diffUTCTime` t2)
 
 localClockOffset :: NTPReply -> NominalDiffTime
 localClockOffset = go . timestamps
