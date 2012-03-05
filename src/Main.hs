@@ -108,7 +108,7 @@ roundtripDelay = go . timestamps
 localClockOffset :: NTPReply -> NominalDiffTime
 localClockOffset = go . timestamps
   where
-    go (t1,t2,t3,t4) = ((t2 `diffUTCTime` t1) + (t3 `diffUTCTime` t4)) / 2
+    go (t1,t2,t3,t4) = ((t2 `diffUTCTime` t1) - (t4 `diffUTCTime` t3)) / 2
 
 timestamps :: NTPReply -> (UTCTime, UTCTime, UTCTime, UTCTime)
 timestamps (NTPReply ntpDestinationTime NTPMsg {..}) =
