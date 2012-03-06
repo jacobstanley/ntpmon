@@ -9,14 +9,12 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Data.List (intercalate)
 import Data.Serialize
-import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock
 import Data.Word (Word64)
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import System.CPUTime.Rdtsc (rdtsc)
 import System.IO
-import System.Posix.Clock (Clock (..), TimeSpec (..), getTime)
 import System.Timeout (timeout)
 import Text.Printf (printf)
 
@@ -28,9 +26,9 @@ hosts :: [HostName]
 hosts =
     [ "localhost"
     , "time.uwa.edu.au"
-    , "203.171.85.237" -- PPS
     , "ntp.ii.net"
-    , "JakeAir.local"
+    , "203.171.85.237" -- PPS
+    --, "JakeAir.local"
     --, "au.pool.ntp.org"
     --, "1.au.pool.ntp.org"
     --, "2.au.pool.ntp.org"
@@ -97,8 +95,8 @@ updateServer sock svr = do
     rs <- toList =<< ntpRecv sock t1
     return (insertRecords svr rs)
   where
-    toList (Left err) = return [] --putStrLn ("Error: " ++ err) >> return []
-    toList (Right x)  = return [x]
+    toList (Left _)  = return []
+    toList (Right x) = return [x]
 
 insertRecords :: Server -> [Record] -> Server
 insertRecords svr xs = svr { svrRecords = records }
@@ -162,7 +160,6 @@ meanUTC :: UTCTime -> UTCTime -> UTCTime
 meanUTC x y = ((y `diffUTCTime` x) / 2) `addUTCTime` x
 
 showMilli :: NominalDiffTime -> String
---showMilli t = printf "%+.4fms" ms
 showMilli t = printf "%.4f" ms
   where
     ms = (1000 :: Double) * (realToFrac t)
@@ -173,18 +170,3 @@ type Timestamp = Word64
 
 getTimestamp :: IO Timestamp
 getTimestamp = rdtsc
-
---getTimestamp :: IO Timestamp
---getTimestamp = do
---    TimeSpec {..} <- getTime Monotonic
---    let timestamp = (fromIntegral sec) * 1000000
---                  + ((fromIntegral nsec) `div` 1000)
---    return timestamp
-
---getTimestamp = do
---    now <- getCurrentTime
---    let diff = (now `diffUTCTime` origin)
---        timestamp = truncate (10000000 * diff)
---    return timestamp
---  where
---    origin = UTCTime (fromGregorian 2012 1 1) 0
