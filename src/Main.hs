@@ -7,9 +7,11 @@ module Main where
 import Control.Applicative ((<$>))
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
+import Control.Monad (when)
 import Data.List (intercalate)
 import Data.Serialize
 import Data.Time.Clock
+import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Word (Word64)
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
@@ -28,26 +30,35 @@ hosts =
     , "time.uwa.edu.au"
     , "ntp.ii.net"
     , "203.171.85.237" -- PPS
-    --, "JakeAir.local"
-    --, "au.pool.ntp.org"
-    --, "1.au.pool.ntp.org"
-    --, "2.au.pool.ntp.org"
-    --, "3.au.pool.ntp.org"
-    --, "fi.pool.ntp.org"
+    , "ntp.tourism.wa.gov.au"
     ]
 
 main :: IO ()
 main = withSocketsDo $ do
     hSetBuffering stdout LineBuffering
-    servers <- concat <$> mapM getServers hosts
-    putStrLn (intercalate "," (map showAddress servers))
+    servers@(x:xs) <- concat <$> mapM getServers hosts
+
+    let headers = [showAddress x, "CPU"] ++ map showAddress xs
+        units   = ["seconds since 1970", "clock cycles"]
+               ++ replicate ((length servers) - 1) "ms"
+
+    putStrLn (intercalate "," headers)
+    putStrLn (intercalate "," units)
     bracket udpSocket sClose (loop servers)
   where
     loop servers sock = do
-        servers' <- mapM (update sock) servers
-        --putStrLn "NTP Server Offsets"
-        putStrLn (intercalate "," (map showOffset (calcOffsets servers')))
-        --putStrLn ""
+        servers'@(ref:others) <- mapM (update sock) servers
+
+        let refRecords = svrRecords ref
+        when (length refRecords >= 2) $ do
+            let (i0, utc) = refRecords !! 0
+                (i1, _)   = refRecords !! 1
+                offsets   = map (showOffset . calcOffset ref) others
+                unixTime  = (init . show) (utcTimeToPOSIXSeconds utc)
+                fields    = [unixTime, show i0] ++ offsets
+
+            putStrLn (intercalate "," fields)
+
         threadDelay 1000000
         loop servers' sock
 
@@ -57,12 +68,7 @@ main = withSocketsDo $ do
 
     showAddress = (takeWhile (/= ':') . show) . svrAddress
 
-    showOffset (_, offset) = (maybe "Unknown" showMilli offset)
-
-    -- showOffset (Server {..}, offset) = printf "%-18s %-16s %s\n"
-    --     svrHostName
-    --     ((reverse . drop 4 . reverse . show) svrAddress)
-    --     (maybe "Unknown Offset" showMilli offset)
+    showOffset offset = (maybe "Unknown" showMilli offset)
 
 ------------------------------------------------------------------------
 -- Types
@@ -103,22 +109,21 @@ insertRecords svr xs = svr { svrRecords = records }
   where
     records = take 5 (xs ++ svrRecords svr)
 
-calcOffsets :: [Server] -> [(Server, Maybe NominalDiffTime)]
-calcOffsets []     = []
-calcOffsets (x:xs) = (x, Just 0) : map go xs
+calcOffset :: Server -> Server -> Maybe NominalDiffTime
+calcOffset x y = (`diffUTCTime` t) <$> (timeAt i y)
   where
-    (i, t) = (head . svrRecords) x
-    go x'  = let t'     = timeAt i (svrRecords x')
-                 offset = (`diffUTCTime` t) <$> t'
-             in (x', offset)
+    (i, t) = lastRecord x
 
-timeAt :: Timestamp -> [Record] -> Maybe UTCTime
-timeAt i rs =
+lastRecord :: Server -> Record
+lastRecord = head . svrRecords
+
+timeAt :: Timestamp -> Server -> Maybe UTCTime
+timeAt i Server{..} =
     if null r2 || null r1
     then Nothing
     else Just (interp i (head r1) (last r2))
   where
-    (r2, r1) = span ((> i) . fst) rs
+    (r2, r1) = span ((> i) . fst) svrRecords
 
 interp :: Timestamp -> Record -> Record -> UTCTime
 interp i (i0, t0) (i1, t1) = t
