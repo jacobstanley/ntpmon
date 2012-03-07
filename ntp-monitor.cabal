@@ -20,9 +20,12 @@ executable ntp-monitor
     , cereal     == 0.3.*
     , network    == 2.3.*
     , old-locale == 1.0.*
-    , rdtsc-bsd  == 0.1.*
     , time       == 1.4.*
-    , Win32      == 2.2.*
+
+  if os(windows)
+    build-depends: Win32 == 2.2.*
+  else
+    build-depends: rdtsc-bsd == 0.1.*
 
   ghc-options:
     -O2 -Wall

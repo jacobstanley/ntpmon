@@ -2,10 +2,10 @@
 
 module System.Clock (ClockCount, getClockCount) where
 
-import Control.Applicative ((<$>))
 import Data.Word (Word64)
 
 #ifdef mingw32_HOST_OS
+import Control.Applicative ((<$>))
 import System.Win32.Time (queryPerformanceCounter)
 #else
 import System.CPUTime.Rdtsc (rdtsc)
