@@ -4,71 +4,94 @@
 --module Main (main) where
 module Main where
 
-import Control.Applicative ((<$>))
-import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
-import Control.Monad (when)
-import Data.List (intercalate)
-import Data.Serialize
-import Data.Time.Clock
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Word (Word64)
-import Network.Socket hiding (send, sendTo, recv, recvFrom)
-import Network.Socket.ByteString
-import System.CPUTime.Rdtsc (rdtsc)
-import System.IO
-import System.Timeout (timeout)
-import Text.Printf (printf)
+import           Control.Applicative ((<$>))
+import           Control.Concurrent (threadDelay)
+import           Control.Exception (IOException, bracket, handle)
+import           Control.Monad (when)
+import           Data.List (intercalate)
+import qualified Data.ByteString as B
+import           Data.Serialize
+import           Data.Time.Clock
+import           Data.Time.Format
+import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import           Network.Socket hiding (send, sendTo, recv, recvFrom)
+import           Network.Socket.ByteString
+import           System.Environment (getArgs)
+import           System.Locale (defaultTimeLocale)
+import           System.IO
+import           System.Clock
+import           System.Timeout (timeout)
+import           Text.Printf (printf)
 
-import Data.NTP hiding (Server, getTime)
+import           Data.NTP hiding (Server, getTime)
 
 ------------------------------------------------------------------------
 
-hosts :: [HostName]
-hosts =
-    [ "localhost"
-    , "time.uwa.edu.au"
-    , "ntp.ii.net"
-    , "203.171.85.237" -- PPS
-    , "ntp.tourism.wa.gov.au"
-    ]
-
 main :: IO ()
 main = withSocketsDo $ do
+    hosts <- getArgs
+    if length hosts < 2
+       then putStr usage
+       else do
+         (reference:servers) <- concat <$> mapM getServers hosts
+         monitor reference servers
+
+usage :: String
+usage = "ntp-monitor 0.1\n\
+\Usage: ntp-monitor REFERENCE SERVER [SERVER]..\
+\\n\
+\\n  REFERENCE  The NTP server which the other servers will be measured\
+\\n             against.\
+\\n\
+\\n  SERVER     An NTP server to monitor.\
+\\n\
+\\nNTP servers can be specified using either their hostname or IP address.\
+\\n"
+
+monitor :: Server -> [Server] -> IO ()
+monitor ref ss = do
     hSetBuffering stdout LineBuffering
-    servers@(x:xs) <- concat <$> mapM getServers hosts
 
-    let headers = [showAddress x, "CPU"] ++ map showAddress xs
-        units   = ["seconds since 1970", "clock cycles"]
-               ++ replicate ((length servers) - 1) "ms"
+    (putStrLn . intercalate "," . map fst) headers
+    (putStrLn . intercalate "," . map snd) headers
 
-    putStrLn (intercalate "," headers)
-    putStrLn (intercalate "," units)
-    bracket udpSocket sClose (loop servers)
+    bracket udpSocket sClose (monitorLoop ref ss)
   where
-    loop servers sock = do
-        servers'@(ref:others) <- mapM (update sock) servers
+    headers = [ (svrName ref ++ " - Unix Time", "Seconds Since 1970")
+              , (svrName ref ++ " - UTC Time", "UTC Time") ]
+           ++ map (\s -> (svrName s ++ " - Offset", "Milliseconds")) ss
+           ++ [ ("Counter Frequency", "MHz") ]
 
-        let refRecords = svrRecords ref
-        when (length refRecords >= 2) $ do
-            let (i0, utc) = refRecords !! 0
-                (i1, _)   = refRecords !! 1
-                offsets   = map (showOffset . calcOffset ref) others
-                unixTime  = (init . show) (utcTimeToPOSIXSeconds utc)
-                fields    = [unixTime, show i0] ++ offsets
+monitorLoop :: Server -> [Server] -> Socket -> IO ()
+monitorLoop ref ss sock = do
+    ref' <- updateServer sock ref
+    ss'  <- mapM (updateServer sock) ss
 
-            putStrLn (intercalate "," fields)
+    let refRecords = svrRecords ref'
 
-        threadDelay 1000000
-        loop servers' sock
+    when (length refRecords >= 3) $ do
+        let (c0, utc0)   = refRecords !! 1 -- 2nd latest record
+            (c1, utc1)   = refRecords !! 0 -- latest record
+            deltaCounter = (fromIntegral (c1 - c0) / (utc1 `diffUTCTime` utc0))
+                         / 1000000.0
+                      -- / 1000000000.0
+                      -- / (3.0666666666667 * 1000000000.0) -- 3.067 GHz
+                      -- / (2.995 * 1000000.0)    -- 2.995 MHz
 
-    update sock svr = do
-        svr' <- updateServer sock svr
-        return svr'
+            offsets   = map (showOffset . calcOffset ref) ss'
 
-    showAddress = (takeWhile (/= ':') . show) . svrAddress
+            utcTime   = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S.%q" utc1
+            unixTime  = (init . show) (utcTimeToPOSIXSeconds utc1)
+            clockRate = (init . show) deltaCounter
 
-    showOffset offset = (maybe "Unknown" showMilli offset)
+            fields    = [unixTime, utcTime] ++ offsets ++ [clockRate]
+
+        putStrLn (intercalate "," fields)
+
+    threadDelay 1000000
+    monitorLoop ref' ss' sock
+  where
+    showOffset = maybe "Unknown" showMilli
 
 ------------------------------------------------------------------------
 -- Types
@@ -79,7 +102,14 @@ data Server = Server {
     , svrRecords  :: [Record]
     } deriving (Show)
 
-type Record = (Timestamp, UTCTime)
+type Record = (ClockCount, UTCTime)
+
+svrName :: Server -> String
+svrName svr | host /= addr = addr ++ " (" ++ host ++ ")"
+            | otherwise    = addr
+  where
+    host = svrHostName svr
+    addr = (takeWhile (/= ':') . show . svrAddress) svr
 
 ------------------------------------------------------------------------
 
@@ -110,49 +140,53 @@ insertRecords svr xs = svr { svrRecords = records }
     records = take 5 (xs ++ svrRecords svr)
 
 calcOffset :: Server -> Server -> Maybe NominalDiffTime
-calcOffset x y = (`diffUTCTime` t) <$> (timeAt i y)
+calcOffset x y = (`diffUTCTime` t) <$> (timeAt c y)
   where
-    (i, t) = lastRecord x
+    (c, t) = lastRecord x
 
 lastRecord :: Server -> Record
 lastRecord = head . svrRecords
 
-timeAt :: Timestamp -> Server -> Maybe UTCTime
-timeAt i Server{..} =
+timeAt :: ClockCount -> Server -> Maybe UTCTime
+timeAt c Server{..} =
     if null r2 || null r1
     then Nothing
-    else Just (interp i (head r1) (last r2))
+    else Just (interp c (head r1) (last r2))
   where
-    (r2, r1) = span ((> i) . fst) svrRecords
+    (r2, r1) = span ((> c) . fst) svrRecords
 
-interp :: Timestamp -> Record -> Record -> UTCTime
-interp i (i0, t0) (i1, t1) = t
+interp :: ClockCount -> Record -> Record -> UTCTime
+interp c (c0, t0) (c1, t1) = lerpUTC alpha t0 t1
   where
-    t = ((t1 `diffUTCTime` t0) * alpha) `addUTCTime` t0
-    alpha = fromIntegral (i - i0) / fromIntegral (i1 - i0)
+    alpha = fromIntegral (c - c0) / fromIntegral (c1 - c0)
+
+lerpUTC :: NominalDiffTime -> UTCTime -> UTCTime -> UTCTime
+lerpUTC alpha t0 t1 = ((t1 `diffUTCTime` t0) * alpha) `addUTCTime` t0
 
 ------------------------------------------------------------------------
 
 udpSocket :: IO Socket
 udpSocket = socket AF_INET Datagram defaultProtocol
 
-ntpSend :: Socket -> SockAddr -> IO Timestamp
+ntpSend :: Socket -> SockAddr -> IO ClockCount
 ntpSend sock addr = do
     now <- getCurrentTime
-    timestamp <- getTimestamp
     let msg = emptyNTPMsg { ntpTransmitTime = now }
         bs  = runPut (put msg)
+    count <- (B.length bs) `seq` getClockCount
     sendAllTo sock bs addr
-    return timestamp
+    return count
 
-ntpRecv :: Socket -> Timestamp -> IO (Either String Record)
+ntpRecv :: Socket -> ClockCount -> IO (Either String Record)
 ntpRecv sock t1 = do
-    mbs <- timeout 1000000 (recv sock 128)
-    t4 <- getTimestamp
+    mbs <- (handleIOErrors . timeout 1000000 . recv sock) 128
+    t4 <- getClockCount
     return $ case mbs of
       Nothing -> Left "Timed out"
       Just bs -> record t4 <$> runGet get bs
   where
+    handleIOErrors = handle (\(_ :: IOException) -> return Nothing)
+
     record t4 NTPMsg {..} =
         (mean t1 t4, meanUTC ntpReceiveTime ntpTransmitTime)
 
@@ -168,10 +202,3 @@ showMilli :: NominalDiffTime -> String
 showMilli t = printf "%.4f" ms
   where
     ms = (1000 :: Double) * (realToFrac t)
-
-------------------------------------------------------------------------
-
-type Timestamp = Word64
-
-getTimestamp :: IO Timestamp
-getTimestamp = rdtsc

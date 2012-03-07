@@ -16,11 +16,13 @@ executable ntp-monitor
 
   build-depends:
       base       == 4.*
+    , bytestring == 0.9.*
     , cereal     == 0.3.*
     , network    == 2.3.*
     , old-locale == 1.0.*
     , rdtsc-bsd  == 0.1.*
     , time       == 1.4.*
+    , Win32      == 2.2.*
 
   ghc-options:
     -O2 -Wall
