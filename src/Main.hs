@@ -23,7 +23,7 @@ import           System.IO
 import           System.Timeout (timeout)
 import           Text.Printf (printf)
 
-import           Data.NTP hiding (Server)
+import           Network.NTP.Types hiding (Server)
 import           System.Counter (CounterInfo(..), readCounter, analyzeCounter)
 
 ------------------------------------------------------------------------

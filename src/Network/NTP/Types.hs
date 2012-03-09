@@ -5,7 +5,7 @@
 -- | Most of the documentation for this module as been taken from
 -- RFC-2030 (http://tools.ietf.org/html/rfc2030) which describes the
 -- SNTP v4.
-module Data.NTP where
+module Network.NTP.Types where
 
 import Control.Applicative ((<$>), (<*>))
 import Data.Bits ((.&.), shiftL, shiftR)
