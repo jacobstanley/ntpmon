@@ -7,11 +7,10 @@ module Main where
 import           Control.Applicative ((<$>))
 import           Control.Concurrent (threadDelay)
 import           Control.Exception (IOException, bracket, handle)
-import           Control.Monad (when, replicateM, forever)
+import           Control.Monad (when)
 import           Data.List (intercalate)
 import qualified Data.ByteString as B
 import           Data.Serialize
-import qualified Data.Vector.Unboxed as V
 import           Data.Time.Clock
 import           Data.Time.Format
 import           Data.Word (Word64)
@@ -21,80 +20,16 @@ import           Network.Socket.ByteString
 import           System.Environment (getArgs)
 import           System.Locale (defaultTimeLocale)
 import           System.IO
-import           Statistics.Sample
-import           Statistics.Distribution.Normal
 import           System.Timeout (timeout)
 import           Text.Printf (printf)
 
 import           Data.NTP hiding (Server)
 import           System.Counter (readCounter, analyzeFrequency)
---import           System.CPUTime (getCPUTime)
 
 ------------------------------------------------------------------------
 
 main :: IO ()
-main = do
-    hSetBuffering stdout LineBuffering
-
-    hPutStr stderr "Analyzing high performance counter..."
-    freq <- analyzeFrequency
-    hPutStrLn stderr "done"
-    hPutStrLn stderr ("Frequency = " ++ showFreq (fromIntegral freq))
-
-    --putStrLn $ unwords $ ["drift_us", "last", "mean", "stddev%", "range%", "kurtosis", "skewness"]
-    --xs <- reverse <$> replicateM 5 getSample
-    --loop xs
-  where
-    loop xs = do
-        x <- getSample
-
-        let xs' = x : take 200 xs
-            ds = V.fromList (map2 dcdt xs')
-            d  = dcdt x (head xs)
-            drift = 1000000 * (1.0 - d / mean ds)
-
-            _n  = normalFromSample ds
-            sd_pct = 100.0 * (stdDev ds / mean ds)
-            rng_pct = 100.0 * (range ds / mean ds)
-
-        putStrLn $ unwords $ map showD
-            [drift, d, mean ds, sd_pct, rng_pct, kurtosis ds, skewness ds]
-        loop xs'
-
-    getSample :: IO (Counter, UTCTime)
-    getSample = do
-        threadDelay 200000
-        t <- getCurrentTime
-        c <- readCounter
-        return (c, t)
-
-    dcdt :: (Counter, UTCTime) -> (Counter, UTCTime) -> Double
-    dcdt (c1, t1) (c0, t0) = dc / dt :: Double
-      where
-        dc = fromIntegral (c1 - c0)
-        dt = realToFrac (t1 `diffUTCTime` t0)
-
-    showD :: Double -> String
-    showD = printf "%.8f"
-
-    map2 :: (a -> a -> b) -> [a] -> [b]
-    map2 _ []  = []
-    map2 _ [_] = []
-    map2 f (x0:x1:xs) = f x0 x1 : map2 f (x1:xs)
-
-showFreq :: Double -> String
-showFreq hz | hz < kilo = format "" 1
-            | hz < mega = format "K" kilo
-            | hz < giga = format "M" mega
-            | otherwise = format "G" giga
-  where
-    format unit size = printf "%.2f %sHz" (hz / size) unit
-    kilo = 1000
-    mega = 1000 * kilo
-    giga = 1000 * mega
-
-main1 :: IO ()
-main1 = withSocketsDo $ do
+main = withSocketsDo $ do
     hosts <- getArgs
     if length hosts < 2
        then putStr usage
@@ -116,6 +51,13 @@ usage = "ntp-monitor 0.1\n\
 
 monitor :: Server -> [Server] -> IO ()
 monitor ref ss = do
+    hSetBuffering stdout LineBuffering
+
+    hPutStr stderr "Analyzing high performance counter..."
+    freq <- analyzeFrequency
+    hPutStrLn stderr "done"
+    hPutStrLn stderr ("Frequency = " ++ showFreq (fromIntegral freq))
+
     (putStrLn . intercalate "," . map fst) headers
     (putStrLn . intercalate "," . map snd) headers
 
@@ -268,3 +210,14 @@ showMilli :: NominalDiffTime -> String
 showMilli t = printf "%.4f" ms
   where
     ms = (1000 :: Double) * (realToFrac t)
+
+showFreq :: Double -> String
+showFreq hz | hz < kilo = format "" 1
+            | hz < mega = format "K" kilo
+            | hz < giga = format "M" mega
+            | otherwise = format "G" giga
+  where
+    format unit size = printf "%.2f %sHz" (hz / size) unit
+    kilo = 1000
+    mega = 1000 * kilo
+    giga = 1000 * mega
