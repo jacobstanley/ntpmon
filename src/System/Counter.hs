@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP #-}
 
-module System.Clock (ClockCount, getClockCount) where
+module System.Counter (readCounter) where
 
 import Data.Word (Word64)
 
@@ -13,12 +13,10 @@ import System.CPUTime.Rdtsc (rdtsc)
 
 ------------------------------------------------------------------------
 
-type ClockCount = Word64
-
-getClockCount :: IO ClockCount
+readCounter :: IO Word64
 
 #ifdef mingw32_HOST_OS
-getClockCount = fromIntegral <$> queryPerformanceCounter
+readCounter = fromIntegral <$> queryPerformanceCounter
 #else
-getClockCount = rdtsc
+readCounter = rdtsc
 #endif

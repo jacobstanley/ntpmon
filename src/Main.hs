@@ -13,17 +13,18 @@ import qualified Data.ByteString as B
 import           Data.Serialize
 import           Data.Time.Clock
 import           Data.Time.Format
+import           Data.Word (Word64)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
 import           System.Environment (getArgs)
 import           System.Locale (defaultTimeLocale)
 import           System.IO
-import           System.Clock
 import           System.Timeout (timeout)
 import           Text.Printf (printf)
 
 import           Data.NTP hiding (Server, getTime)
+import           System.Counter (readCounter)
 
 ------------------------------------------------------------------------
 
@@ -102,7 +103,9 @@ data Server = Server {
     , svrRecords  :: [Record]
     } deriving (Show)
 
-type Record = (ClockCount, UTCTime)
+type Counter = Word64
+
+type Record = (Counter, UTCTime)
 
 svrName :: Server -> String
 svrName svr | host /= addr = addr ++ " (" ++ host ++ ")"
@@ -147,7 +150,7 @@ calcOffset x y = (`diffUTCTime` t) <$> (timeAt c y)
 lastRecord :: Server -> Record
 lastRecord = head . svrRecords
 
-timeAt :: ClockCount -> Server -> Maybe UTCTime
+timeAt :: Counter -> Server -> Maybe UTCTime
 timeAt c Server{..} =
     if null r2 || null r1
     then Nothing
@@ -155,7 +158,7 @@ timeAt c Server{..} =
   where
     (r2, r1) = span ((> c) . fst) svrRecords
 
-interp :: ClockCount -> Record -> Record -> UTCTime
+interp :: Counter -> Record -> Record -> UTCTime
 interp c (c0, t0) (c1, t1) = lerpUTC alpha t0 t1
   where
     alpha = fromIntegral (c - c0) / fromIntegral (c1 - c0)
@@ -168,19 +171,19 @@ lerpUTC alpha t0 t1 = ((t1 `diffUTCTime` t0) * alpha) `addUTCTime` t0
 udpSocket :: IO Socket
 udpSocket = socket AF_INET Datagram defaultProtocol
 
-ntpSend :: Socket -> SockAddr -> IO ClockCount
+ntpSend :: Socket -> SockAddr -> IO Counter
 ntpSend sock addr = do
     now <- getCurrentTime
     let msg = emptyNTPMsg { ntpTransmitTime = now }
         bs  = runPut (put msg)
-    count <- (B.length bs) `seq` getClockCount
+    count <- (B.length bs) `seq` readCounter
     sendAllTo sock bs addr
     return count
 
-ntpRecv :: Socket -> ClockCount -> IO (Either String Record)
+ntpRecv :: Socket -> Counter -> IO (Either String Record)
 ntpRecv sock t1 = do
     mbs <- (handleIOErrors . timeout 1000000 . recv sock) 128
-    t4 <- getClockCount
+    t4 <- readCounter
     return $ case mbs of
       Nothing -> Left "Timed out"
       Just bs -> record t4 <$> runGet get bs
