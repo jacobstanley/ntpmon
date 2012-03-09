@@ -7,7 +7,7 @@ module Main where
 import           Control.Applicative ((<$>))
 import           Control.Concurrent (threadDelay)
 import           Control.Exception (IOException, bracket, handle)
-import           Control.Monad (when, replicateM)
+import           Control.Monad (when, replicateM, forever)
 import           Data.List (intercalate)
 import qualified Data.ByteString as B
 import           Data.Serialize
@@ -27,7 +27,7 @@ import           System.Timeout (timeout)
 import           Text.Printf (printf)
 
 import           Data.NTP hiding (Server)
-import           System.Counter (readCounter)
+import           System.Counter (readCounter, analyzeFrequency)
 --import           System.CPUTime (getCPUTime)
 
 ------------------------------------------------------------------------
@@ -35,10 +35,15 @@ import           System.Counter (readCounter)
 main :: IO ()
 main = do
     hSetBuffering stdout LineBuffering
-    --putStrLn "Analysing counter"
-    putStrLn $ unwords $ ["drift_ms", "last", "mean", "stddev%", "range%", "kurtosis", "skewness"]
-    xs <- reverse <$> replicateM 5 getSample
-    loop xs
+
+    hPutStr stderr "Analyzing high performance counter..."
+    freq <- analyzeFrequency
+    hPutStrLn stderr "done"
+    hPutStrLn stderr ("Frequency = " ++ showFreq (fromIntegral freq))
+
+    --putStrLn $ unwords $ ["drift_us", "last", "mean", "stddev%", "range%", "kurtosis", "skewness"]
+    --xs <- reverse <$> replicateM 5 getSample
+    --loop xs
   where
     loop xs = do
         x <- getSample
@@ -46,7 +51,7 @@ main = do
         let xs' = x : take 200 xs
             ds = V.fromList (map2 dcdt xs')
             d  = dcdt x (head xs)
-            drift = 1000 * (1.0 - d / mean ds)
+            drift = 1000000 * (1.0 - d / mean ds)
 
             _n  = normalFromSample ds
             sd_pct = 100.0 * (stdDev ds / mean ds)
@@ -58,7 +63,7 @@ main = do
 
     getSample :: IO (Counter, UTCTime)
     getSample = do
-        threadDelay 2000000
+        threadDelay 200000
         t <- getCurrentTime
         c <- readCounter
         return (c, t)
@@ -76,6 +81,17 @@ main = do
     map2 _ []  = []
     map2 _ [_] = []
     map2 f (x0:x1:xs) = f x0 x1 : map2 f (x1:xs)
+
+showFreq :: Double -> String
+showFreq hz | hz < kilo = format "" 1
+            | hz < mega = format "K" kilo
+            | hz < giga = format "M" mega
+            | otherwise = format "G" giga
+  where
+    format unit size = printf "%.2f %sHz" (hz / size) unit
+    kilo = 1000
+    mega = 1000 * kilo
+    giga = 1000 * mega
 
 main1 :: IO ()
 main1 = withSocketsDo $ do
