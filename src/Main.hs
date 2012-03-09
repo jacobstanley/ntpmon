@@ -7,10 +7,11 @@ module Main where
 import           Control.Applicative ((<$>))
 import           Control.Concurrent (threadDelay)
 import           Control.Exception (IOException, bracket, handle)
-import           Control.Monad (when)
+import           Control.Monad (when, replicateM)
 import           Data.List (intercalate)
 import qualified Data.ByteString as B
 import           Data.Serialize
+import qualified Data.Vector.Unboxed as V
 import           Data.Time.Clock
 import           Data.Time.Format
 import           Data.Word (Word64)
@@ -20,16 +21,64 @@ import           Network.Socket.ByteString
 import           System.Environment (getArgs)
 import           System.Locale (defaultTimeLocale)
 import           System.IO
+import           Statistics.Sample
+import           Statistics.Distribution.Normal
 import           System.Timeout (timeout)
 import           Text.Printf (printf)
 
-import           Data.NTP hiding (Server, getTime)
+import           Data.NTP hiding (Server)
 import           System.Counter (readCounter)
+--import           System.CPUTime (getCPUTime)
 
 ------------------------------------------------------------------------
 
 main :: IO ()
-main = withSocketsDo $ do
+main = do
+    hSetBuffering stdout LineBuffering
+    --putStrLn "Analysing counter"
+    putStrLn $ unwords $ ["drift_ms", "last", "mean", "stddev%", "range%", "kurtosis", "skewness"]
+    xs <- reverse <$> replicateM 5 getSample
+    loop xs
+  where
+    loop xs = do
+        x <- getSample
+
+        let xs' = x : take 200 xs
+            ds = V.fromList (map2 dcdt xs')
+            d  = dcdt x (head xs)
+            drift = 1000 * (1.0 - d / mean ds)
+
+            _n  = normalFromSample ds
+            sd_pct = 100.0 * (stdDev ds / mean ds)
+            rng_pct = 100.0 * (range ds / mean ds)
+
+        putStrLn $ unwords $ map showD
+            [drift, d, mean ds, sd_pct, rng_pct, kurtosis ds, skewness ds]
+        loop xs'
+
+    getSample :: IO (Counter, UTCTime)
+    getSample = do
+        threadDelay 2000000
+        t <- getCurrentTime
+        c <- readCounter
+        return (c, t)
+
+    dcdt :: (Counter, UTCTime) -> (Counter, UTCTime) -> Double
+    dcdt (c1, t1) (c0, t0) = dc / dt :: Double
+      where
+        dc = fromIntegral (c1 - c0)
+        dt = realToFrac (t1 `diffUTCTime` t0)
+
+    showD :: Double -> String
+    showD = printf "%.8f"
+
+    map2 :: (a -> a -> b) -> [a] -> [b]
+    map2 _ []  = []
+    map2 _ [_] = []
+    map2 f (x0:x1:xs) = f x0 x1 : map2 f (x1:xs)
+
+main1 :: IO ()
+main1 = withSocketsDo $ do
     hosts <- getArgs
     if length hosts < 2
        then putStr usage
@@ -51,8 +100,6 @@ usage = "ntp-monitor 0.1\n\
 
 monitor :: Server -> [Server] -> IO ()
 monitor ref ss = do
-    hSetBuffering stdout LineBuffering
-
     (putStrLn . intercalate "," . map fst) headers
     (putStrLn . intercalate "," . map snd) headers
 
@@ -191,12 +238,12 @@ ntpRecv sock t1 = do
     handleIOErrors = handle (\(_ :: IOException) -> return Nothing)
 
     record t4 NTPMsg {..} =
-        (mean t1 t4, meanUTC ntpReceiveTime ntpTransmitTime)
+        (meanInt t1 t4, meanUTC ntpReceiveTime ntpTransmitTime)
 
 ------------------------------------------------------------------------
 
-mean :: Integral a => a -> a -> a
-mean x y = ((y - x) `div` 2) + x
+meanInt :: Integral a => a -> a -> a
+meanInt x y = ((y - x) `div` 2) + x
 
 meanUTC :: UTCTime -> UTCTime -> UTCTime
 meanUTC x y = ((y `diffUTCTime` x) / 2) `addUTCTime` x
