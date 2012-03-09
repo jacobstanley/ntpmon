@@ -24,7 +24,7 @@ import           System.Timeout (timeout)
 import           Text.Printf (printf)
 
 import           Data.NTP hiding (Server)
-import           System.Counter (readCounter, analyzeFrequency)
+import           System.Counter (CounterInfo(..), readCounter, analyzeCounter)
 
 ------------------------------------------------------------------------
 
@@ -54,9 +54,10 @@ monitor ref ss = do
     hSetBuffering stdout LineBuffering
 
     hPutStr stderr "Analyzing high performance counter..."
-    freq <- analyzeFrequency
+    CounterInfo{..} <- analyzeCounter
     hPutStrLn stderr "done"
-    hPutStrLn stderr ("Frequency = " ++ showFreq (fromIntegral freq))
+    hPutStrLn stderr ("Frequency = " ++ showFreq (fromIntegral cntFrequency))
+    hPutStrLn stderr ("Precision = " ++ showTime (fromIntegral cntPrecision / fromIntegral cntFrequency))
 
     (putStrLn . intercalate "," . map fst) headers
     (putStrLn . intercalate "," . map snd) headers
@@ -113,8 +114,8 @@ type Counter = Word64
 type Record = (Counter, UTCTime)
 
 svrName :: Server -> String
-svrName svr | host /= addr = addr ++ " (" ++ host ++ ")"
-            | otherwise    = addr
+svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
+            | otherwise    = host
   where
     host = svrHostName svr
     addr = (takeWhile (/= ':') . show . svrAddress) svr
@@ -211,13 +212,27 @@ showMilli t = printf "%.4f" ms
   where
     ms = (1000 :: Double) * (realToFrac t)
 
+showTime :: Double -> String
+showTime = showPrefix "sec" 3
+
 showFreq :: Double -> String
-showFreq hz | hz < kilo = format "" 1
-            | hz < mega = format "K" kilo
-            | hz < giga = format "M" mega
-            | otherwise = format "G" giga
+showFreq = showPrefix "Hz" 3
+
+showPrefix :: String -> Int -> Double -> String
+showPrefix unit dp x | x < micro = format "n" nano
+                     | x < milli = format "u" micro
+                     | x < 1     = format "m" milli
+                     | x < kilo  = format ""  1
+                     | x < mega  = format "k" kilo
+                     | x < giga  = format "M" mega
+                     | otherwise = format "G" giga
   where
-    format unit size = printf "%.2f %sHz" (hz / size) unit
-    kilo = 1000
-    mega = 1000 * kilo
-    giga = 1000 * mega
+    fmt = "%." ++ show dp ++ "f %s" ++ unit
+    format prefix size = printf fmt (x / size) prefix
+
+    nano  = 1e-9
+    micro = 1e-6
+    milli = 1e-3
+    kilo = 1e3
+    mega = 1e6
+    giga = 1e9
