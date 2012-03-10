@@ -1,6 +1,8 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Network.NTP where
 
@@ -8,37 +10,92 @@ import           Control.Applicative ((<$>))
 import           Control.Exception (IOException, bracket, handle)
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader
-import qualified Data.ByteString as B
 import           Data.Serialize
-import           Data.Time.Clock
+import           Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime)
+import qualified Data.Time.Clock as T
 import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
 import           System.Timeout (timeout)
 
 import           Network.NTP.Types hiding (Server)
-import           System.Counter (readCounter)
+import           System.Counter
+import           Text.PrefixSI
 
 ------------------------------------------------------------------------
--- Types
+-- NTP Monad
 
 newtype NTP a = NTP { runNTP :: ReaderT NTPData IO a }
     deriving (Monad, MonadIO, MonadReader NTPData)
 
 data NTPData = NTPData {
       ntpSocket :: Socket
+    , ntpClock  :: Clock
     }
 
-withNTP :: NTP a -> IO a
-withNTP = withSocketsDo . bracket create destroy . runReaderT . runNTP
+type Logger = String -> IO ()
+
+withNTP :: Logger -> NTP a -> IO a
+withNTP logger = withSocketsDo . bracket create destroy . runReaderT . runNTP
   where
     create = do
         ntpSocket <- socket AF_INET Datagram defaultProtocol
+        ntpClock  <- initCounterClock logger
+        logger (show ntpClock)
         return NTPData{..}
 
     destroy NTPData{..} = sClose ntpSocket
 
 ------------------------------------------------------------------------
+-- Clock
+
+type ClockIndex = Word64
+
+data Clock = Clock {
+      clockTime0      :: UTCTime
+    , clockIndex0     :: ClockIndex
+    , clockFrequency  :: Word64
+    , clockPrecision  :: Word64
+    , getCurrentIndex :: IO ClockIndex
+    } deriving (Show)
+
+instance Show (IO ClockIndex) where
+    show _ = ".."
+
+-- | Initializes a 'Clock' based on the high precision counter.
+initCounterClock :: Logger -> IO Clock
+initCounterClock logger = do
+    logger "Analyzing high precision counter..."
+
+    counter <- analyzeCounter
+
+    let clockFrequency = cntFrequency counter
+        clockPrecision = cntPrecision counter
+        freq = fromIntegral clockFrequency
+        prec = fromIntegral clockPrecision / freq
+
+    logger ("Frequency = " ++ showFreq freq)
+    logger ("Precision = " ++ showTime prec)
+
+    let getCurrentIndex = readCounter
+    clockTime0  <- T.getCurrentTime
+    clockIndex0 <- getCurrentIndex
+
+    return Clock{..}
+
+-- | Gets the current time according to the 'Clock'.
+getCurrentTime :: Clock -> IO UTCTime
+getCurrentTime clock = clockTime clock <$> getCurrentIndex clock
+
+-- | Gets the time at the given index.
+clockTime :: Clock -> ClockIndex -> UTCTime
+clockTime Clock{..} index = (diff / freq) `addUTCTime` clockTime0
+  where
+    diff = fromIntegral (index - clockIndex0)
+    freq = fromIntegral clockFrequency
+
+------------------------------------------------------------------------
+-- Server
 
 data Server = Server {
       svrHostName :: HostName
@@ -46,9 +103,7 @@ data Server = Server {
     , svrRecords  :: [Record]
     } deriving (Show)
 
-type Counter = Word64
-
-type Record = (Counter, UTCTime)
+type Record = (UTCTime, UTCTime)
 
 svrName :: Server -> String
 svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
@@ -73,8 +128,8 @@ resolveServers host =
 
 updateServer :: Server -> NTP Server
 updateServer svr = do
-    t1 <- transmit (svrAddress svr)
-    rs <- toList =<< receive t1
+    transmit svr
+    rs <- toList =<< receive
     return (insertRecords svr rs)
   where
     toList (Left _)  = return []
@@ -85,31 +140,27 @@ insertRecords svr xs = svr { svrRecords = records }
   where
     records = take 5 (xs ++ svrRecords svr)
 
-transmit :: SockAddr -> NTP Counter
-transmit addr = do
+transmit :: Server -> NTP ()
+transmit Server{..} = do
     NTPData{..} <- ask
     liftIO $ do
-        now <- getCurrentTime
-        let msg = emptyNTPMsg { ntpTransmitTime = now }
-            bs  = runPut (put msg)
-        count <- (B.length bs) `seq` readCounter
-        sendAllTo ntpSocket bs addr
-        return count
+        now <- getCurrentTime ntpClock
+        let msg = (runPut . put) emptyNTPMsg { t3 = now }
+        sendAllTo ntpSocket msg svrAddress
 
-receive :: Counter -> NTP (Either String Record)
-receive t1 = do
+receive :: NTP (Either String Record)
+receive = do
     NTPData{..} <- ask
     liftIO $ do
         mbs <- (handleIOErrors . timeout 1000000 . recv ntpSocket) 128
-        t4 <- readCounter
+        t   <- getCurrentTime ntpClock
         return $ case mbs of
             Nothing -> Left "Timed out"
-            Just bs -> record t4 <$> runGet get bs
+            Just bs -> record t <$> runGet get bs
   where
     handleIOErrors = handle (\(_ :: IOException) -> return Nothing)
 
-    record t4 NTPMsg {..} =
-        (meanInt t1 t4, meanUTC ntpReceiveTime ntpTransmitTime)
+    record t4 NTPMsg{..} = (meanUTC t1 t4, meanUTC t2 t3)
 
 ------------------------------------------------------------------------
 

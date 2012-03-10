@@ -162,16 +162,16 @@ data NTPMsg = NTPMsg {
     -- | The time at which the local clock was last set or corrected.
     , ntpReferenceTime :: UTCTime
 
-    -- | /T1/ The time at which the request departed the client for the
-    -- server.
-    , ntpOriginateTime :: UTCTime
+    -- | /Originate Time/ The time at which the request departed the client for
+    -- the server.
+    , t1 :: UTCTime
 
-    -- | /T2/ The time at which the request arrived at the server.
-    , ntpReceiveTime :: UTCTime
+    -- | /Receive Time/ The time at which the request arrived at the server.
+    , t2 :: UTCTime
 
-    -- | /T3/ The time at which the reply departed the server for the
-    -- client.
-    , ntpTransmitTime :: UTCTime
+    -- | /Transmit Time/ The time at which the reply departed the server for
+    -- the client.
+    , t3 :: UTCTime
 
     } deriving (Eq, Show)
 
@@ -186,7 +186,7 @@ emptyNTPMsg = NTPMsg NoWarning Version4 Client 0 0 0 0 0 0
 -- Serialize
 
 instance Serialize NTPMsg where
-    put NTPMsg {..} = do
+    put NTPMsg{..} = do
         putLVM      ntpLeapIndicator ntpVersion ntpMode
         putWord8    ntpStratum
         putWord8    ntpPoll
@@ -194,10 +194,10 @@ instance Serialize NTPMsg where
         putWord32be ntpRootDelay
         putWord32be ntpRootDispersion
         putWord32be ntpReferenceId
-        putTime     ntpReferenceTime
-        putTime     ntpOriginateTime
-        putTime     ntpReceiveTime
-        putTime     ntpTransmitTime
+        putUTCTime  ntpReferenceTime
+        putUTCTime  t1
+        putUTCTime  t2
+        putUTCTime  t3
     get = do
         (ntpLeapIndicator, ntpVersion, ntpMode) <- getLVM
         ntpStratum        <- getWord8
@@ -206,11 +206,11 @@ instance Serialize NTPMsg where
         ntpRootDelay      <- getWord32be
         ntpRootDispersion <- getWord32be
         ntpReferenceId    <- getWord32be
-        ntpReferenceTime  <- getTime
-        ntpOriginateTime  <- getTime
-        ntpReceiveTime    <- getTime
-        ntpTransmitTime   <- getTime
-        return NTPMsg {..}
+        ntpReferenceTime  <- getUTCTime
+        t1                <- getUTCTime
+        t2                <- getUTCTime
+        t3                <- getUTCTime
+        return NTPMsg{..}
 
 ------------------------------------------------------------------------
 -- Serializing Timestamps
@@ -222,13 +222,13 @@ instance Serialize NTPMsg where
 data NTPTime = NTPTime !Word32 !Word32
     deriving (Eq, Show)
 
-putTime :: Putter UTCTime
-putTime t = putWord32be int >> putWord32be frac
+putUTCTime :: Putter UTCTime
+putUTCTime t = putWord32be int >> putWord32be frac
   where
     (NTPTime int frac) = fromUTC t
 
-getTime :: Get UTCTime
-getTime = toUTC <$> (NTPTime <$> getWord32be <*> getWord32be)
+getUTCTime :: Get UTCTime
+getUTCTime = toUTC <$> (NTPTime <$> getWord32be <*> getWord32be)
 
 fromUTC :: UTCTime -> NTPTime
 fromUTC = diff2ntp . (`diffUTCTime` ntpOrigin)

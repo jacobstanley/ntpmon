@@ -22,7 +22,7 @@ import System.CPUTime.Rdtsc (rdtsc)
 
 ------------------------------------------------------------------------
 
--- | Information about the high resolution counter.
+-- | Information about the high precision counter.
 data CounterInfo = CounterInfo {
       cntFrequency :: Word64
     , cntPrecision :: Word64
@@ -30,7 +30,7 @@ data CounterInfo = CounterInfo {
 
 ------------------------------------------------------------------------
 
--- | Reads the value of the best available high resolution counter
+-- | Reads the value of the best available high precision counter
 -- on the system.
 readCounter :: IO Word64
 
@@ -41,7 +41,7 @@ readCounter = rdtsc
 #endif
 
 
--- | Analyzes the high resolution counter and returns its frequency and
+-- | Analyzes the high precision counter and returns its frequency and
 -- precision.
 analyzeCounter :: IO CounterInfo
 analyzeCounter = do
@@ -49,7 +49,7 @@ analyzeCounter = do
     cntPrecision <- analyzePrecision
     return CounterInfo{..}
 
--- | Analyzes the frequency of the high resolution counter and returns
+-- | Analyzes the frequency of the high precision counter and returns
 -- the result in Hz (i.e. the amount the counter is incremented each
 -- second.)
 analyzeFrequency :: Int -- ^ the time (in seconds) to spend analyzing the counter
@@ -62,7 +62,7 @@ analyzeFrequency seconds = do
     c1 <- readCounter
     return $! rate c0 t0 c1 t1
 
--- | Determines the smallest possible increment of the high resolution
+-- | Determines the smallest possible increment of the high precision
 -- counter. This effectively measures the overhead of the call to read
 -- the counter.
 analyzePrecision :: IO Word64
