@@ -164,14 +164,14 @@ data NTPMsg = NTPMsg {
 
     -- | /Originate Time/ The time at which the request departed the client for
     -- the server.
-    , t1 :: UTCTime
+    , ntpT1 :: UTCTime
 
     -- | /Receive Time/ The time at which the request arrived at the server.
-    , t2 :: UTCTime
+    , ntpT2 :: UTCTime
 
     -- | /Transmit Time/ The time at which the reply departed the server for
     -- the client.
-    , t3 :: UTCTime
+    , ntpT3 :: UTCTime
 
     } deriving (Eq, Show)
 
@@ -195,9 +195,9 @@ instance Serialize NTPMsg where
         putWord32be ntpRootDispersion
         putWord32be ntpReferenceId
         putUTCTime  ntpReferenceTime
-        putUTCTime  t1
-        putUTCTime  t2
-        putUTCTime  t3
+        putUTCTime  ntpT1
+        putUTCTime  ntpT2
+        putUTCTime  ntpT3
     get = do
         (ntpLeapIndicator, ntpVersion, ntpMode) <- getLVM
         ntpStratum        <- getWord8
@@ -207,9 +207,9 @@ instance Serialize NTPMsg where
         ntpRootDispersion <- getWord32be
         ntpReferenceId    <- getWord32be
         ntpReferenceTime  <- getUTCTime
-        t1                <- getUTCTime
-        t2                <- getUTCTime
-        t3                <- getUTCTime
+        ntpT1             <- getUTCTime
+        ntpT2             <- getUTCTime
+        ntpT3             <- getUTCTime
         return NTPMsg{..}
 
 ------------------------------------------------------------------------

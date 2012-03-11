@@ -63,13 +63,13 @@ monitorLoop ref ss = do
     ref' <- updateServer ref
     ss'  <- mapM updateServer ss
 
-    let refRecords = svrRecords ref'
+    let refRecords = map record (svrSamples ref')
 
     when (length refRecords >= 3) $ liftIO $ do
         let (i0, utc0)   = refRecords !! 1 -- 2nd latest record
             (i1, utc1)   = refRecords !! 0 -- latest record
-            deltaCounter = ((i1 `diffUTCTime` i0) / (utc1 `diffUTCTime` utc0))
-                      -- / 1000000000.0
+            deltaCounter = (fromIntegral (i1 - i0) / (utc1 `diffUTCTime` utc0))
+                         / 1000000.0
                       -- / (3.0666666666667 * 1000000000.0) -- 3.067 GHz
                       -- / (2.995 * 1000000.0)    -- 2.995 MHz
 
@@ -91,25 +91,25 @@ monitorLoop ref ss = do
 ------------------------------------------------------------------------
 
 calcOffset :: Server -> Server -> Maybe NominalDiffTime
-calcOffset x y = (`diffUTCTime` t) <$> (serverTimeAt i y)
+calcOffset x y = (`diffUTCTime` t) <$> (timeAt i y)
   where
-    (i, t) = lastRecord x
+    (i, t) = record (lastSample x)
 
-lastRecord :: Server -> Record
-lastRecord = head . svrRecords
+lastSample :: Server -> RawSample
+lastSample = head . svrSamples
 
-serverTimeAt :: UTCTime -> Server -> Maybe UTCTime
-serverTimeAt i Server{..} =
-    if null r2 || null r1
+timeAt :: ClockIndex -> Server -> Maybe UTCTime
+timeAt i Server{..} =
+    if null s2 || null s1
     then Nothing
-    else Just (interp i (head r1) (last r2))
+    else Just (interp i (head s1) (last s2))
   where
-    (r2, r1) = span ((> i) . fst) svrRecords
+    (s2, s1) = span ((> i) . fst) (map record svrSamples)
 
-interp :: UTCTime -> Record -> Record -> UTCTime
+interp :: ClockIndex -> Record -> Record -> UTCTime
 interp i (i0, t0) (i1, t1) = lerpUTC alpha t0 t1
   where
-    alpha = (i `diffUTCTime` i0) / (i1 `diffUTCTime` i0)
+    alpha = fromIntegral (i - i0) / fromIntegral (i1 - i0)
 
 lerpUTC :: NominalDiffTime -> UTCTime -> UTCTime -> UTCTime
 lerpUTC alpha t0 t1 = ((t1 `diffUTCTime` t0) * alpha) `addUTCTime` t0
