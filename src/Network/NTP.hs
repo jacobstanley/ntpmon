@@ -1,4 +1,7 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
@@ -8,24 +11,31 @@ module Network.NTP where
 import           Control.Applicative ((<$>))
 import           Control.Exception (IOException, bracket, handle)
 import           Control.Monad.IO.Class
-import           Control.Monad.Reader
-import           Data.Serialize
+import           Control.Monad.State
+import           Data.List (tails)
+import           Data.Maybe (mapMaybe)
+import           Data.Serialize (encode, decode)
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, diffUTCTime)
 import qualified Data.Time.Clock as T
+import qualified Data.Vector.Unboxed as V
 import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
+import           Statistics.LinearRegression (linearRegression)
+import           Statistics.Sample (mean)
 import           System.Timeout (timeout)
 
 import           Network.NTP.Types hiding (Server)
 import           System.Counter
 import           Text.PrefixSI
 
+--import           Debug.Trace
+
 ------------------------------------------------------------------------
 -- NTP Monad
 
-newtype NTP a = NTP { runNTP :: ReaderT NTPData IO a }
-    deriving (Monad, MonadIO, MonadReader NTPData)
+newtype NTP a = NTP { runNTP :: StateT NTPData IO a }
+    deriving (Functor, Monad, MonadIO, MonadState NTPData)
 
 data NTPData = NTPData {
       ntpSocket :: Socket
@@ -35,7 +45,8 @@ data NTPData = NTPData {
 type Logger = String -> IO ()
 
 withNTP :: Logger -> NTP a -> IO a
-withNTP logger = withSocketsDo . bracket create destroy . runReaderT . runNTP
+withNTP logger =
+    fmap fst . withSocketsDo . bracket create destroy . runStateT . runNTP
   where
     create = do
         ntpSocket <- socket AF_INET Datagram defaultProtocol
@@ -84,7 +95,7 @@ getCurrentTime clock = clockTime clock <$> getCurrentIndex clock
 
 -- | Gets the time at the given index.
 clockTime :: Clock -> ClockIndex -> UTCTime
-clockTime Clock{..} index = (diff / freq) `addUTCTime` clockTime0
+clockTime Clock{..} index = clockTime0 `add` (diff / freq)
   where
     diff = fromIntegral (index - clockIndex0)
     freq = fromIntegral clockFrequency
@@ -93,16 +104,27 @@ clockTime Clock{..} index = (diff / freq) `addUTCTime` clockTime0
 clockIndex :: Clock -> UTCTime -> ClockIndex
 clockIndex Clock{..} time = clockIndex0 + round (diff * freq)
   where
-    diff = time `diffUTCTime` clockTime0
+    diff = time `sub` clockTime0
     freq = fromIntegral clockFrequency
+
+
+adjustFrequency :: Double -- ^ the drift rate in seconds/second
+                -> Clock -> Clock
+adjustFrequency adj c = c
+    { clockFrequency = round ((1 - adj) * fromIntegral (clockFrequency c)) }
+
+adjustOffset :: Double -- ^ the offset in seconds
+             -> Clock -> Clock
+adjustOffset adj c = c
+    { clockTime0 = clockTime0 c `add` realToFrac adj }
 
 ------------------------------------------------------------------------
 -- Server
 
 data Server = Server {
-      svrHostName :: HostName
-    , svrAddress  :: SockAddr
-    , svrSamples  :: [RawSample]
+      svrHostName   :: HostName
+    , svrAddress    :: SockAddr
+    , svrRawSamples :: [RawSample]
     } deriving (Show)
 
 svrName :: Server -> String
@@ -111,41 +133,6 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
   where
     host = svrHostName svr
     addr = (takeWhile (/= ':') . show . svrAddress) svr
-
-data RawSample = RawSample {
-      rawT1 :: ClockIndex
-    , rawT2 :: UTCTime
-    , rawT3 :: UTCTime
-    , rawT4 :: ClockIndex
-    } deriving (Show)
-
-data Sample = Sample {
-      t1 :: UTCTime
-    , t2 :: UTCTime
-    , t3 :: UTCTime
-    , t4 :: UTCTime
-    } deriving (Show)
-
-reify :: Clock -> RawSample -> Sample
-reify clock RawSample{..} = Sample{..}
-  where
-    t1 = clockTime clock rawT1
-    t2 = rawT2
-    t3 = rawT3
-    t4 = clockTime clock rawT4
-
-offset :: Sample -> NominalDiffTime
-offset Sample{..} = ((t2 `diffUTCTime` t1) + (t3 `diffUTCTime` t4)) / 2
-
-delay :: Sample -> NominalDiffTime
-delay Sample{..} = (t4 `diffUTCTime` t1) - (t3 `diffUTCTime` t2)
-
-type Record = (ClockIndex, UTCTime)
-
-record :: RawSample -> Record
-record RawSample{..} = (meanInt rawT1 rawT4, meanUTC rawT2 rawT3)
-
-------------------------------------------------------------------------
 
 -- | Resolves a list of IP addresses registered for the specified
 -- hostname and creates 'Server' instances for each of them.
@@ -162,33 +149,57 @@ resolveServers host =
 updateServer :: Server -> NTP Server
 updateServer svr = do
     transmit svr
-    ms <- receive
-    case ms of
-        Left _  -> return svr
-        Right s -> return (insertSample svr s)
-
-insertSample :: Server -> RawSample -> Server
-insertSample svr x = svr { svrSamples = samples }
+    either (const svr) withSample <$> receive
   where
-    samples = take 8 (x : svrSamples svr)
+    withSample s = svr { svrRawSamples = take maxSamples (s : svrRawSamples svr) }
+
+maxSamples :: Int
+maxSamples = 200
+
+adjustClock :: Server -> Clock -> Clock
+adjustClock Server{..} clock =
+    --traceShow (clockTime0 clock') $
+    --traceShow (clockFrequency clock') $
+    --traceShow (off*1000000,freq*1000000) $
+    case samples of
+      xs | length xs >= 10 -> clock'
+         | otherwise       -> adjustOffset meanOffset clock
+  where
+    clock' = (adjustOffset off . adjustFrequency freq) clock
+
+    samples      = extractBest svrRawSamples
+    earliestTime = t1 (last samples)
+    times        = doubleVector (realToFrac . (`sub` earliestTime) . t4) samples
+    offsets      = doubleVector (realToFrac . offset) samples
+    (off,freq)   = linearRegression times offsets
+
+    extractBest = mapMaybe best . tails . map (reify clock)
+
+    -- this is the mean of all the offsets (not just the best ones)
+    meanOffset = mean . doubleVector (realToFrac . offset . reify clock)
+               $ svrRawSamples
+
+    doubleVector :: (a -> Double) -> [a] -> V.Vector Double
+    doubleVector f = V.fromList . map f
+
 
 transmit :: Server -> NTP ()
 transmit Server{..} = do
-    NTPData{..} <- ask
+    NTPData{..} <- get
     liftIO $ do
         now <- getCurrentTime ntpClock
-        let msg = (runPut . put) emptyNTPMsg { ntpT3 = now }
+        let msg = encode emptyNTPMsg { ntpT3 = now }
         sendAllTo ntpSocket msg svrAddress
 
 receive :: NTP (Either String RawSample)
 receive = do
-    NTPData{..} <- ask
+    NTPData{..} <- get
     liftIO $ do
         mbs <- (handleIOErrors . timeout 1000000 . recv ntpSocket) 128
         t   <- getCurrentIndex ntpClock
         return $ case mbs of
             Nothing -> Left "Timed out"
-            Just bs -> mkSample ntpClock t <$> runGet get bs
+            Just bs -> mkSample ntpClock t <$> decode bs
   where
     handleIOErrors = handle (\(_ :: IOException) -> return Nothing)
 
@@ -199,9 +210,52 @@ receive = do
         , rawT4 = t4 }
 
 ------------------------------------------------------------------------
+-- Samples
 
-meanInt :: Integral a => a -> a -> a
-meanInt x y = ((y - x) `div` 2) + x
+data RawSample = RawSample {
+      rawT1 :: ClockIndex
+    , rawT2 :: UTCTime
+    , rawT3 :: UTCTime
+    , rawT4 :: ClockIndex
+    } deriving (Show, Eq)
 
-meanUTC :: UTCTime -> UTCTime -> UTCTime
-meanUTC x y = ((y `diffUTCTime` x) / 2) `addUTCTime` x
+data Sample = Sample {
+      t1 :: UTCTime
+    , t2 :: UTCTime
+    , t3 :: UTCTime
+    , t4 :: UTCTime
+    } deriving (Show, Eq)
+
+reify :: Clock -> RawSample -> Sample
+reify clock RawSample{..} = Sample{..}
+  where
+    t1 = clockTime clock rawT1
+    t2 = rawT2
+    t3 = rawT3
+    t4 = clockTime clock rawT4
+
+offset :: Sample -> NominalDiffTime
+offset Sample{..} = ((t2 `sub` t1) + (t3 `sub` t4)) / 2
+
+delay :: Sample -> NominalDiffTime
+delay Sample{..} = (t4 `sub` t1) - (t3 `sub` t2)
+
+best :: [Sample] -> Maybe Sample
+best = go . take bestWindow
+  where
+    go [] = Nothing
+    go xxs@(x:xs) | length xxs /= bestWindow     = Nothing
+                  | all ((> delay x) . delay) xs = Just x
+                  | otherwise                    = Nothing
+
+-- | The number of samples to consider as the best in the sliding window.
+bestWindow :: Int
+bestWindow = 8
+
+-- | The difference between two absolute times.
+sub :: UTCTime -> UTCTime -> NominalDiffTime
+sub = diffUTCTime
+
+-- | Adds an offset to an absolute time.
+add :: UTCTime -> NominalDiffTime -> UTCTime
+add = flip addUTCTime
