@@ -33,7 +33,7 @@ main = do
             monitor reference servers
 
 usage :: String
-usage = "ntp-monitor 0.1\n\
+usage = "ntp-monitor 0.2\n\
 \Usage: ntp-monitor REFERENCE [SERVER]..\
 \\n\
 \\n  REFERENCE  The NTP server which the other servers will be measured\
