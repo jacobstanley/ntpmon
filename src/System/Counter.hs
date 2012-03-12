@@ -10,7 +10,7 @@ module System.Counter (
     ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (when, replicateM)
+import Control.Monad (replicateM)
 import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import Data.Word (Word64)
 
@@ -68,12 +68,10 @@ analyzeFrequency seconds = do
 analyzePrecision :: IO Word64
 analyzePrecision = do
     cs <- replicateM 1000 readCounter
-    let prec = (minimum . map diff) (zip cs (tail cs))
-    when (prec == 0)
-         (error "System.Counter.analyzePrecision: counter returned same number twice")
-    return prec
+    return (prec cs)
   where
     diff (t0, t1) = t1 - t0
+    prec xs = (minimum . filter (/= 0) . map diff) (zip xs (tail xs))
 
 ------------------------------------------------------------------------
 

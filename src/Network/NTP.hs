@@ -12,7 +12,8 @@ import           Control.Applicative ((<$>))
 import           Control.Exception (IOException, bracket, handle)
 import           Control.Monad.IO.Class
 import           Control.Monad.State
-import           Data.List (tails)
+import           Data.List (nub, sortBy, tails)
+import           Data.Ord (comparing)
 import           Data.Maybe (mapMaybe)
 import           Data.Serialize (encode, decode)
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, diffUTCTime)
@@ -22,13 +23,13 @@ import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
 import           Statistics.LinearRegression (linearRegression)
-import           Statistics.Sample (mean)
 import           System.Timeout (timeout)
 
 import           Network.NTP.Types hiding (Server)
 import           System.Counter
 import           Text.PrefixSI
 
+--import           Statistics.Sample (mean)
 --import           Debug.Trace
 
 ------------------------------------------------------------------------
@@ -156,14 +157,17 @@ updateServer svr = do
 maxSamples :: Int
 maxSamples = 200
 
-adjustClock :: Server -> Clock -> Clock
+adjustClock :: Server -> Clock -> Maybe Clock
 adjustClock Server{..} clock =
+    --traceShow (length samples) $
+    --traceShow (mean offsets) $
+    --traceShow (mean times) $
     --traceShow (clockTime0 clock') $
     --traceShow (clockFrequency clock') $
     --traceShow (off*1000000,freq*1000000) $
-    case samples of
-      xs | length xs >= 10 -> clock'
-         | otherwise       -> adjustOffset meanOffset clock
+    if length samples > 2
+    then Just clock'
+    else Nothing
   where
     clock' = (adjustOffset off . adjustFrequency freq) clock
 
@@ -173,11 +177,7 @@ adjustClock Server{..} clock =
     offsets      = doubleVector (realToFrac . offset) samples
     (off,freq)   = linearRegression times offsets
 
-    extractBest = mapMaybe best . tails . map (reify clock)
-
-    -- this is the mean of all the offsets (not just the best ones)
-    meanOffset = mean . doubleVector (realToFrac . offset . reify clock)
-               $ svrRawSamples
+    extractBest = nub . mapMaybe clockFilter . tails . map (reify clock)
 
     doubleVector :: (a -> Double) -> [a] -> V.Vector Double
     doubleVector f = V.fromList . map f
@@ -238,19 +238,29 @@ offset :: Sample -> NominalDiffTime
 offset Sample{..} = ((t2 `sub` t1) + (t3 `sub` t4)) / 2
 
 delay :: Sample -> NominalDiffTime
-delay Sample{..} = (t4 `sub` t1) - (t3 `sub` t2)
-
-best :: [Sample] -> Maybe Sample
-best = go . take bestWindow
+delay Sample{..} =
+    -- If the server is very close to us, or even on the same computer,
+    -- and its clock is not very precise (e.g. Win 7 is ~1ms) then the
+    -- total roundtrip time can be less than the processing time. In
+    -- this case just ignore the processing time.
+    if roundtripTime < processingTime
+    then roundtripTime
+    else roundtripTime - processingTime
   where
-    go [] = Nothing
-    go xxs@(x:xs) | length xxs /= bestWindow     = Nothing
-                  | all ((> delay x) . delay) xs = Just x
-                  | otherwise                    = Nothing
+    roundtripTime  = (t4 `sub` t1)
+    processingTime = (t3 `sub` t2)
 
--- | The number of samples to consider as the best in the sliding window.
-bestWindow :: Int
-bestWindow = 8
+-- | The NTP clock filter. Select the sample (from the last 8) with the
+-- lowest delay.
+clockFilter :: [Sample] -> Maybe Sample
+clockFilter = go . take window
+  where
+    -- number of samples to consider in the sliding window
+    window = 8
+
+    go xs = if length xs == window
+            then (Just . head . sortBy (comparing delay)) xs
+            else Nothing
 
 -- | The difference between two absolute times.
 sub :: UTCTime -> UTCTime -> NominalDiffTime

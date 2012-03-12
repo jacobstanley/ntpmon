@@ -5,11 +5,12 @@ module Main (main) where
 
 import Control.Applicative ((<$>))
 import Control.Concurrent (threadDelay)
-import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put)
+import Control.Monad (when)
+import Data.Maybe (fromJust)
 import Data.List (intercalate)
-import Data.Time.Clock
+import Data.Time.Clock hiding (getCurrentTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format
 import System.Environment (getArgs)
@@ -33,7 +34,7 @@ main = do
 
 usage :: String
 usage = "ntp-monitor 0.1\n\
-\Usage: ntp-monitor REFERENCE SERVER [SERVER]..\
+\Usage: ntp-monitor REFERENCE [SERVER]..\
 \\n\
 \\n  REFERENCE  The NTP server which the other servers will be measured\
 \\n             against.\
@@ -47,64 +48,70 @@ monitor :: Server -> [Server] -> NTP ()
 monitor ref ss = do
     liftIO $ do
         hSetBuffering stdout LineBuffering
-
-        putStrLn "# Offset* and Delay* are the Offset and Delay values for"
-        putStrLn "# updates which were selected for use by NTP Clock Filter"
-        putStrLn "# algorithm."
-
         (putStrLn . intercalate "," . map fst) headers
         (putStrLn . intercalate "," . map snd) headers
 
-    monitorLoop ref ss
+    monitorLoop 0 ref ss
   where
     servers = ref:ss
 
     headers = [("Unix Time", "Seconds Since 1970"), ("UTC Time", "UTC Time")]
-           ++ map (header "Offset"  "Microseconds") servers
-           ++ map (header "Delay"   "Microseconds") servers
-           ++ map (header "Offset*" "Microseconds") servers
-           ++ map (header "Delay*"  "Microseconds") servers
+           ++ map (header "Offset" "Microseconds") servers
+           ++ map (header "Delay"  "Microseconds") servers
+           ++ map (header "Filtered Offset" "Microseconds") servers
+           ++ map (header "Filtered Delay"  "Microseconds") servers
 
     header name unit s = (name ++ " - " ++ svrName s, unit)
 
 
-monitorLoop :: Server -> [Server] -> NTP ()
-monitorLoop ref ss = do
+monitorLoop :: Int -> Server -> [Server] -> NTP ()
+monitorLoop syncCount ref ss = do
+    -- update servers
     ref' <- updateServer ref
     ss'  <- mapM updateServer ss
 
-    ntp@NTPData{..} <- get
-    let clock = adjustClock ref' ntpClock
-    put ntp { ntpClock = clock }
+    -- sync clock with reference server
+    mclock <- syncClockWith ref'
 
-    let servers    = ref':ss'
-        svrSamples = map (reify clock) . svrRawSamples
+    -- write samples to csv
+    when (syncCount > 2) $ liftIO $
+        writeSamples (fromJust mclock) (ref':ss')
 
-        samples = map (head . svrSamples) servers
-        offsets = map (showMicro . offset) samples
-        delays  = map (showMicro . delay) samples
-
-        bestSamples = map (best . svrSamples) servers
-        bestOffsets = map (maybe "_" showMicro . fmap offset) bestSamples
-        bestDelays  = map (maybe "_" showMicro . fmap delay) bestSamples
-
-        utc      = t4 (head samples)
-        utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S.%q" utc
-        unixTime = (init . show) (utcTimeToPOSIXSeconds utc)
-
-        fields = [unixTime, utcTime]
-              ++ offsets ++ delays
-              ++ bestOffsets ++ bestDelays
-
-        settled = (>= bestWindow) . length . svrSamples
-
-    when (settled ref') $
-        liftIO (putStrLn (intercalate "," fields))
-
+    -- sleep 1 sec before we update again
     liftIO (threadDelay 1000000)
-    monitorLoop ref' ss'
 
-------------------------------------------------------------------------
+    let syncCount' = min 3 (syncCount + maybe 0 (const 1) mclock)
+
+    monitorLoop syncCount' ref' ss'
+
+syncClockWith :: Server -> NTP (Maybe Clock)
+syncClockWith server = do
+    ntp@NTPData{..} <- get
+    let mclock = adjustClock server ntpClock
+    case mclock of
+        Nothing    -> return ()
+        Just clock -> put ntp { ntpClock = clock }
+    return mclock
+
+writeSamples :: Clock -> [Server] -> IO ()
+writeSamples clock servers = putStrLn (intercalate "," fields)
+  where
+    fields = [unixTime, utcTime] ++ offsets ++ delays
+          ++ filteredOffsets ++ filteredDelays
+
+    svrSamples = map (reify clock) . svrRawSamples
+
+    samples = map (head . svrSamples) servers
+    offsets = map (showMicro . offset) samples
+    delays  = map (showMicro . delay) samples
+
+    filteredSamples = map (clockFilter . svrSamples) servers
+    filteredOffsets = map (maybe "_" showMicro . fmap offset) filteredSamples
+    filteredDelays  = map (maybe "_" showMicro . fmap delay) filteredSamples
+
+    utc4     = t4 (head samples)
+    utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S.%q" utc4
+    unixTime = (init . show) (utcTimeToPOSIXSeconds utc4)
 
 showMicro :: NominalDiffTime -> String
 showMicro t = printf "%.1f" ms
