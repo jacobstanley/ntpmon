@@ -1,5 +1,5 @@
 name:                ntp-monitor
-version:             0.2
+version:             0.3
 synopsis:            Monitors NTP servers
 license:             BSD3
 license-file:        LICENSE
