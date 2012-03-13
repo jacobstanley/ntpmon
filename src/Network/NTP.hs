@@ -24,7 +24,7 @@ import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
 import           Statistics.LinearRegression (linearRegression)
 
-import           Network.NTP.Types hiding (Server)
+import           Network.NTP.Packet hiding (Server)
 import           System.Counter
 import           Text.PrefixSI
 
@@ -192,8 +192,8 @@ transmit :: Server -> NTP ()
 transmit Server{..} = do
     NTPData{..} <- get
     liftIO $ do
-        now <- getCurrentTime ntpClock
-        let msg = encode emptyNTPMsg { ntpT3 = now }
+        now <- getCurrentIndex ntpClock
+        let msg = (encode . requestMsg . toTimestamp) now
         sendAllTo ntpSocket msg svrAddress
 
 receive :: NTP (Either String RawSample)
@@ -204,14 +204,14 @@ receive = do
         t   <- getCurrentIndex ntpClock
         return $ case mbs of
             Nothing          -> Left "Timed out"
-            Just (bs, _addr) -> mkSample ntpClock t <$> decode bs
+            Just (bs, _addr) -> mkSample t <$> decode bs
   where
     handleIOErrors = handle (\(_ :: IOException) -> return Nothing)
 
-    mkSample clock t4 NTPMsg{..} = RawSample
-        { rawT1 = clockIndex clock ntpT1
-        , rawT2 = ntpT2
-        , rawT3 = ntpT3
+    mkSample t4 Packet{..} = RawSample
+        { rawT1 = fromTimestamp ntpT1
+        , rawT2 = fromTimestamp ntpT2
+        , rawT3 = fromTimestamp ntpT3
         , rawT4 = t4 }
 
 ------------------------------------------------------------------------
