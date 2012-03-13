@@ -1,19 +1,33 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | Most of the documentation for this module as been taken from
 -- RFC-2030 (http://tools.ietf.org/html/rfc2030) which describes the
 -- SNTP v4.
-module Network.NTP.Types where
+module Network.NTP.Packet (
+    -- * Types
+      LeapIndicator (..)
+    , Version (..)
+    , Mode (..)
+    , Stratum
+    , ReferenceId
+    , Timestamp (..)
+    , Packet (..)
+
+    -- * 'Packet' functions
+    , requestMsg
+
+    -- * 'Timestamp' functions
+    , TimestampConvert (..)
+    , ntpOrigin
+    ) where
 
 import Control.Applicative ((<$>), (<*>))
-import Data.Bits ((.&.), shiftL, shiftR)
+import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Serialize
 import Data.Time.Calendar
 import Data.Time.Clock
 import Data.Time.Format ()
-import Data.Word (Word8, Word32)
+import Data.Word (Word8, Word32, Word64)
 
 ------------------------------------------------------------------------
 -- Types
@@ -112,8 +126,15 @@ type Stratum = Word8
 -- appropriate.
 type ReferenceId = Word32
 
--- | An NTP message.
-data NTPMsg = NTPMsg {
+-- | An NTP timestamp. On the wire, timestamps are represented as a
+-- 64-bit unsigned fixed-point number, in seconds relative to 1 January
+-- 1900. The integer part is in the first 32 bits and the fraction part
+-- in the last 32 bits.
+data Timestamp = Timestamp !Word32 !Word32
+    deriving (Eq, Show)
+
+-- | An NTP data packet.
+data Packet = Packet {
     -- | See 'LeapIndicator' for details.
       ntpLeapIndicator :: !LeapIndicator
 
@@ -160,90 +181,64 @@ data NTPMsg = NTPMsg {
     , ntpReferenceId :: !Word32
 
     -- | The time at which the local clock was last set or corrected.
-    , ntpReferenceTime :: UTCTime
+    , ntpReferenceTime :: !Timestamp
 
     -- | /Originate Time/ The time at which the request departed the client for
     -- the server.
-    , ntpT1 :: UTCTime
+    , ntpT1 :: !Timestamp
 
     -- | /Receive Time/ The time at which the request arrived at the server.
-    , ntpT2 :: UTCTime
+    , ntpT2 :: !Timestamp
 
     -- | /Transmit Time/ The time at which the reply departed the server for
     -- the client.
-    , ntpT3 :: UTCTime
+    , ntpT3 :: !Timestamp
 
     } deriving (Eq, Show)
 
 ------------------------------------------------------------------------
--- Functions
+-- NTP Messages
 
-emptyNTPMsg :: NTPMsg
-emptyNTPMsg = NTPMsg NoWarning Version3 Client 0 0 0 0 0 0
-              ntpOrigin ntpOrigin ntpOrigin ntpOrigin
+-- | A client message requesting the current time from a server.
+requestMsg :: Timestamp -> Packet
+requestMsg t3 = empty { ntpT3 = t3 }
+  where
+    empty = Packet NoWarning Version3 Client 0 0 0 0 0 0
+            (Timestamp 0 0)
+            (Timestamp 0 0)
+            (Timestamp 0 0)
+            (Timestamp 0 0)
 
 ------------------------------------------------------------------------
--- Serialize
+-- Timestamps
 
-instance Serialize NTPMsg where
-    put NTPMsg{..} = do
-        putLVM      ntpLeapIndicator ntpVersion ntpMode
-        putWord8    ntpStratum
-        putWord8    ntpPoll
-        putWord8    ntpPrecision
-        putWord32be ntpRootDelay
-        putWord32be ntpRootDispersion
-        putWord32be ntpReferenceId
-        putUTCTime  ntpReferenceTime
-        putUTCTime  ntpT1
-        putUTCTime  ntpT2
-        putUTCTime  ntpT3
-    get = do
-        (ntpLeapIndicator, ntpVersion, ntpMode) <- getLVM
-        ntpStratum        <- getWord8
-        ntpPoll           <- getWord8
-        ntpPrecision      <- getWord8
-        ntpRootDelay      <- getWord32be
-        ntpRootDispersion <- getWord32be
-        ntpReferenceId    <- getWord32be
-        ntpReferenceTime  <- getUTCTime
-        ntpT1             <- getUTCTime
-        ntpT2             <- getUTCTime
-        ntpT3             <- getUTCTime
-        return NTPMsg{..}
+-- | Conversion to and from an NTP 'Timestamp'.
+class TimestampConvert a where
+    toTimestamp   :: a -> Timestamp
+    fromTimestamp :: Timestamp -> a
 
-------------------------------------------------------------------------
--- Serializing Timestamps
+instance TimestampConvert UTCTime where
+    toTimestamp   = toTimestamp . (`diffUTCTime` ntpOrigin)
+    fromTimestamp = (`addUTCTime` ntpOrigin) . fromTimestamp
 
--- | An NTP timestamp. On the wire, timestamps are represented as a
--- 64-bit unsigned fixed-point number, in seconds relative to 1 January
--- 1900. The integer part is in the first 32 bits and the fraction part
--- in the last 32 bits.
-data NTPTime = NTPTime !Word32 !Word32
-    deriving (Eq, Show)
-
-putUTCTime :: Putter UTCTime
-putUTCTime t = putWord32be int >> putWord32be frac
-  where
-    (NTPTime int frac) = fromUTC t
-
-getUTCTime :: Get UTCTime
-getUTCTime = toUTC <$> (NTPTime <$> getWord32be <*> getWord32be)
-
-fromUTC :: UTCTime -> NTPTime
-fromUTC = diff2ntp . (`diffUTCTime` ntpOrigin)
-  where
-    diff2ntp :: NominalDiffTime -> NTPTime
-    diff2ntp t = NTPTime int (truncate (frac * maxBound32))
+instance TimestampConvert NominalDiffTime where
+    toTimestamp t = Timestamp int (truncate (frac * maxBound32))
       where
         (int, frac) = properFraction t
 
-toUTC :: NTPTime -> UTCTime
-toUTC = (`addUTCTime` ntpOrigin) . ntp2diff
-  where
-    ntp2diff :: NTPTime -> NominalDiffTime
-    ntp2diff (NTPTime int frac) = fromIntegral int + (fromIntegral frac / maxBound32)
+    fromTimestamp (Timestamp int frac) =
+        fromIntegral int + (fromIntegral frac / maxBound32)
 
+instance TimestampConvert Word64 where
+    toTimestamp t = Timestamp int frac
+      where
+        int  = fromIntegral (t `shiftR` 32)
+        frac = fromIntegral t
+
+    fromTimestamp (Timestamp int frac) =
+        (fromIntegral int `shiftL` 32) .|. fromIntegral frac
+
+-- | The NTP origin, 1 January 1900, as a 'UTCTime'.
 ntpOrigin :: UTCTime
 ntpOrigin = UTCTime (fromGregorian 1900 1 1) 0
 
@@ -251,27 +246,61 @@ maxBound32 :: NominalDiffTime
 maxBound32 = fromIntegral (maxBound :: Word32)
 
 ------------------------------------------------------------------------
--- Serializing the leap indicator / version / mode byte.
+-- Serialize
 
-putLVM :: LeapIndicator -> Version -> Mode -> Put
-putLVM l v m = putWord8 (packLVM l v m)
+instance Serialize Packet where
+    put Packet{..} = do
+        putFlags    ntpLeapIndicator ntpVersion ntpMode
+        putWord8    ntpStratum
+        putWord8    ntpPoll
+        putWord8    ntpPrecision
+        putWord32be ntpRootDelay
+        putWord32be ntpRootDispersion
+        putWord32be ntpReferenceId
+        put         ntpReferenceTime
+        put         ntpT1
+        put         ntpT2
+        put         ntpT3
+    get = do
+        (ntpLeapIndicator, ntpVersion, ntpMode) <- getFlags
+        ntpStratum        <- getWord8
+        ntpPoll           <- getWord8
+        ntpPrecision      <- getWord8
+        ntpRootDelay      <- getWord32be
+        ntpRootDispersion <- getWord32be
+        ntpReferenceId    <- getWord32be
+        ntpReferenceTime  <- get
+        ntpT1             <- get
+        ntpT2             <- get
+        ntpT3             <- get
+        return Packet{..}
 
-getLVM :: Get (LeapIndicator, Version, Mode)
-getLVM = do
+instance Serialize Timestamp where
+    put (Timestamp int frac) = putWord32be int >> putWord32be frac
+    get = Timestamp <$> getWord32be <*> getWord32be
+
+------------------------------------------------------------------------
+-- Serializing the NTP flags (leap indicator, version, mode)
+
+putFlags :: LeapIndicator -> Version -> Mode -> Put
+putFlags l v m = putWord8 (packFlags l v m)
+
+getFlags :: Get (LeapIndicator, Version, Mode)
+getFlags = do
     lvm <- getWord8
-    case unpackLVM lvm of
+    case unpackFlags lvm of
         (Just l, Just v, Just m) -> return (l,v,m)
         (Nothing, _, _) -> fail "invalid leap indicator"
         (_, Nothing, _) -> fail "unknown NTP version"
         (_, _, Nothing) -> fail "unknown message mode"
 
-packLVM :: LeapIndicator -> Version -> Mode -> Word8
-packLVM l v m = (fromLeap l `shiftL` 6)
+packFlags :: LeapIndicator -> Version -> Mode -> Word8
+packFlags l v m = (fromLeap l `shiftL` 6)
               + (fromVersion v `shiftL` 3)
               + fromMode m
 
-unpackLVM :: Word8 -> (Maybe LeapIndicator, Maybe Version, Maybe Mode)
-unpackLVM x = (l, v, m)
+unpackFlags :: Word8 -> (Maybe LeapIndicator, Maybe Version, Maybe Mode)
+unpackFlags x = (l, v, m)
   where
     l = toLeap (x `shiftR` 6) -- bits 1-2
     v = toVersion ((x .&. 0x38) `shiftR` 3) -- bits 3-5
