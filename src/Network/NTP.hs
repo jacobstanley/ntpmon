@@ -152,7 +152,11 @@ updateServer svr = do
     transmit svr
     either (const svr) withSample <$> receive
   where
-    withSample s = svr { svrRawSamples = take maxSamples (s : svrRawSamples svr) }
+    withSample s =
+        let samples = take maxSamples (s : svrRawSamples svr)
+        -- Force the evaluation of the last sample in the list
+        -- to avoid building up lots of unevaluated thunks.
+        in (last samples) `seq` svr { svrRawSamples = samples }
 
 maxSamples :: Int
 maxSamples = 200
