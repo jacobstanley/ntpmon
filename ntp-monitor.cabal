@@ -10,6 +10,10 @@ category:            Network
 build-type:          Simple
 Cabal-version:       >= 1.6
 
+flag tsc
+  default: False
+  description: Force the use of RDTSC on Windows
+
 executable ntp-monitor
   main-is: Main.hs
   hs-source-dirs: src
@@ -27,8 +31,9 @@ executable ntp-monitor
     , transformers      == 0.2.*
     , vector            == 0.9.*
 
-  if os(windows)
+  if os(windows) && !flag(tsc)
     build-depends: Win32 == 2.2.*
+    cpp-options: -DQPC
   else
     build-depends: rdtsc-bsd == 0.1.*
 

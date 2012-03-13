@@ -14,7 +14,7 @@ import Control.Monad (replicateM)
 import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import Data.Word (Word64)
 
-#ifdef mingw32_HOST_OS
+#ifdef QPC
 import System.Win32.Time (queryPerformanceCounter)
 #else
 import System.CPUTime.Rdtsc (rdtsc)
@@ -34,7 +34,7 @@ data CounterInfo = CounterInfo {
 -- on the system.
 readCounter :: IO Word64
 
-#ifdef mingw32_HOST_OS
+#ifdef QPC
 readCounter = fromIntegral `fmap` queryPerformanceCounter
 #else
 readCounter = rdtsc
