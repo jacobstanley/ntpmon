@@ -23,7 +23,6 @@ import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
 import           Statistics.LinearRegression (linearRegression)
-import           System.Timeout (timeout)
 
 import           Network.NTP.Types hiding (Server)
 import           System.Counter
@@ -51,6 +50,8 @@ withNTP logger =
   where
     create = do
         ntpSocket <- socket AF_INET Datagram defaultProtocol
+        -- set timeout to 1000ms, this is the minimum
+        setSocketOption ntpSocket RecvTimeOut 1000
         ntpClock  <- initCounterClock logger
         return NTPData{..}
 
@@ -199,11 +200,11 @@ receive :: NTP (Either String RawSample)
 receive = do
     NTPData{..} <- get
     liftIO $ do
-        mbs <- (handleIOErrors . timeout 1000000 . recv ntpSocket) 128
+        mbs <- (handleIOErrors . fmap Just . recvFrom ntpSocket) 128
         t   <- getCurrentIndex ntpClock
         return $ case mbs of
-            Nothing -> Left "Timed out"
-            Just bs -> mkSample ntpClock t <$> decode bs
+            Nothing          -> Left "Timed out"
+            Just (bs, _addr) -> mkSample ntpClock t <$> decode bs
   where
     handleIOErrors = handle (\(_ :: IOException) -> return Nothing)
 
