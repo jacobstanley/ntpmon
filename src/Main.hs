@@ -54,14 +54,15 @@ monitor ref ss = do
     monitorLoop 0 ref ss
   where
     servers = ref:ss
+    refName = svrHostName ref
 
     headers = [("Unix Time", "Seconds Since 1970"), ("UTC Time", "UTC Time")]
-           ++ map (header "Offset" "Microseconds") servers
-           ++ map (header "Delay"  "Microseconds") servers
-           ++ map (header "Filtered Offset" "Microseconds") servers
-           ++ map (header "Filtered Delay"  "Microseconds") servers
+           ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x)) servers
+           ++ map (header "(ms)" (\x -> "Network Delay to " ++ x)) servers
+           -- ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (filtered)")) servers
+           -- ++ map (header "(ms)" (\x -> "network delay to " ++ x ++ " (filtered)")) servers
 
-    header name unit s = (name ++ " - " ++ svrName s, unit)
+    header unit mkname s = (mkname (svrHostName s), unit)
 
 
 monitorLoop :: Int -> Server -> [Server] -> NTP ()
@@ -97,23 +98,23 @@ writeSamples :: Clock -> [Server] -> IO ()
 writeSamples clock servers = putStrLn (intercalate "," fields)
   where
     fields = [unixTime, utcTime] ++ offsets ++ delays
-          ++ filteredOffsets ++ filteredDelays
+    --      ++ filteredOffsets ++ filteredDelays
 
     svrSamples = map (reify clock) . svrRawSamples
 
     samples = map (head . svrSamples) servers
-    offsets = map (showMicro . offset) samples
-    delays  = map (showMicro . delay) samples
+    offsets = map (showMilli . offset) samples
+    delays  = map (showMilli . delay) samples
 
-    filteredSamples = map (clockFilter . svrSamples) servers
-    filteredOffsets = map (maybe "_" showMicro . fmap offset) filteredSamples
-    filteredDelays  = map (maybe "_" showMicro . fmap delay) filteredSamples
+    --filteredSamples = map (clockFilter . svrSamples) servers
+    --filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
+    --filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
 
     utc4     = t4 (head samples)
-    utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S.%q" utc4
+    utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc4
     unixTime = (init . show) (utcTimeToPOSIXSeconds utc4)
 
-showMicro :: NominalDiffTime -> String
-showMicro t = printf "%.1f" ms
+showMilli :: NominalDiffTime -> String
+showMilli t = printf "%.4f" ms
   where
-    ms = (1000000 :: Double) * (realToFrac t)
+    ms = (1000 :: Double) * (realToFrac t)
