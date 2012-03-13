@@ -2,7 +2,7 @@
 
 -- | Most of the documentation for this module as been taken from
 -- RFC-5905 (http://tools.ietf.org/html/rfc5905) which describes NTPv4.
-module Network.NTP.Packet (
+module Data.NTP (
     -- * Types
       LeapIndicator (..)
     , Version (..)
@@ -217,7 +217,7 @@ data Packet = Packet {
 requestMsg :: Timestamp -> Packet
 requestMsg t3 = empty { ntpT3 = t3 }
   where
-    empty = Packet NoWarning Version3 Client 0 0 0 0 0 0
+    empty = Packet NoWarning Version4 Client 0 0 0 0 0 0
             (Timestamp 0 0)
             (Timestamp 0 0)
             (Timestamp 0 0)

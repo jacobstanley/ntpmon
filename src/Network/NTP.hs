@@ -24,7 +24,7 @@ import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
 import           Statistics.LinearRegression (linearRegression)
 
-import           Network.NTP.Packet hiding (Server)
+import           Data.NTP hiding (Server)
 import           System.Counter
 import           Text.PrefixSI
 
