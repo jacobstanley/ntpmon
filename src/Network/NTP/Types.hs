@@ -179,7 +179,7 @@ data NTPMsg = NTPMsg {
 -- Functions
 
 emptyNTPMsg :: NTPMsg
-emptyNTPMsg = NTPMsg NoWarning Version4 Client 0 0 0 0 0 0
+emptyNTPMsg = NTPMsg NoWarning Version3 Client 0 0 0 0 0 0
               ntpOrigin ntpOrigin ntpOrigin ntpOrigin
 
 ------------------------------------------------------------------------
