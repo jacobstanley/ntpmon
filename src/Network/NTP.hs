@@ -138,9 +138,8 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
 
 -- | Resolves a list of IP addresses registered for the specified
 -- hostname and creates 'Server' instances for each of them.
-resolveServers :: HostName -> NTP [Server]
-resolveServers host = liftIO $
-    map (mkServer . addrAddress) <$> getHostAddrInfo
+resolveServers :: HostName -> IO [Server]
+resolveServers host = map (mkServer . addrAddress) <$> getHostAddrInfo
   where
     mkServer addr   = Server host addr []
     getHostAddrInfo = getAddrInfo hints (Just host) (Just "ntp")

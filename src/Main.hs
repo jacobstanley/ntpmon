@@ -28,8 +28,8 @@ main = do
     if length hosts < 2
        then putStr usage
        else do
+         (reference:servers) <- concat <$> mapM resolveServers hosts
          withNTP (hPutStrLn stderr) $ do
-            (reference:servers) <- concat <$> mapM resolveServers hosts
             monitor reference servers
 
 usage :: String
