@@ -1,8 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
 -- | Most of the documentation for this module as been taken from
--- RFC-2030 (http://tools.ietf.org/html/rfc2030) which describes the
--- SNTP v4.
+-- RFC-5905 (http://tools.ietf.org/html/rfc5905) which describes NTPv4.
 module Network.NTP.Packet (
     -- * Types
       LeapIndicator (..)
@@ -35,10 +34,10 @@ import Data.Word (Word8, Word32, Word64)
 -- | This is a warning of an impending leap second to be inserted or
 -- deleted in the last minute of the current day.
 data LeapIndicator =
-      NoWarning      -- ^ 0 - No warning
-    | LastMinute61   -- ^ 1 - Last minute has 61 seconds
-    | LastMinute59   -- ^ 2 - Last minute has 59 seconds
-    | AlarmCondition -- ^ 3 - Alarm condition (clock not synchronized)
+      NoWarning    -- ^ 0 - No warning
+    | LastMinute61 -- ^ 1 - Last minute of the day has 61 seconds
+    | LastMinute59 -- ^ 2 - Last minute of the day has 59 seconds
+    | Unknown      -- ^ 3 - Unknown (clock unsynchronized)
     deriving (Eq, Show)
 
 -- | The version number is 3 for Version 3 (IPv4 only) and 4 for Version
@@ -54,76 +53,91 @@ data Version =
 -- the reply. In multicast mode, the server should use the 'Broadcast'
 -- mode.
 data Mode =
-      SymmetricActive  -- ^ 1 - Symmetric active
+      Reserved         -- ^ 0 - Reserved
+    | SymmetricActive  -- ^ 1 - Symmetric active
     | SymmetricPassive -- ^ 2 - Symmetric passive
     | Client           -- ^ 3 - Client
     | Server           -- ^ 4 - Server
     | Broadcast        -- ^ 5 - Broadcast
+    | Control          -- ^ 6 - NTP control message
+    | Private          -- ^ 7 - Reserved for private use
     deriving (Eq, Show)
 
 -- | Indicates the stratum level of the local clock, with values defined
 -- as follows:
 --
--- [@0@]      Unspecified or unavailable.
+-- [@0@]      Unspecified or invalid.
 --
--- [@1@]      Primary reference (e.g. radio clock, PPS).
+-- [@1@]      Primary reference (e.g. equipped with a GPS receiver).
 --
--- [@2-15@]   Secondary reference (via NTP or SNTP).
+-- [@2-15@]   Secondary reference (via NTP).
 --
--- [@16-255@] Reserved.
+-- [@16@]     Unsynchronized.
+--
+-- [@17-255@] Reserved.
 --
 type Stratum = Word8
 
--- | This is a 32-bit bitstring identifying the particular reference
--- source. In the case of NTP Version 3 or Version 4 stratum-0
--- (unspecified) or stratum-1 (primary) servers, this is a
--- four-character ASCII string, left justified and zero padded to 32
--- bits. In NTP Version 3 secondary servers, this is the 32-bit IPv4
--- address of the reference source. In NTP Version 4 secondary servers,
--- this is the low order 32 bits of the latest transmit timestamp of the
--- reference source.
+-- | 32-bit code identifying the particular server or reference clock.
+-- The interpretation depends on the value in the stratum field.
 --
--- NTP primary (stratum 1) servers should set this field to a code
--- identifying the external reference source according to the following
--- list:
+-- For packet stratum 0 (unspecified or invalid), this is a
+-- four-character ASCII string, called the "kiss code", used for
+-- debugging and monitoring purposes.
 --
--- [@LOCL@] Uncalibrated local clock used as a primary reference
---          for a subnet without external means of synchronization.
---
--- [@PPS@]  Atomic clock or other pulse-per-second source
---          individually calibrated to national standards.
---
--- [@ACTS@] NIST dialup modem service.
---
--- [@USNO@] USNO modem service.
---
--- [@PTB@]  PTB (Germany) modem service.
---
--- [@TDF@]  Allouis (France) Radio 164 kHz.
---
--- [@DCF@]  Mainflingen (Germany) Radio 77.5 kHz.
---
--- [@MSF@]  Rugby (UK) Radio 60 kHz.
---
--- [@WWV@]  Ft. Collins (US) Radio 2.5, 5, 10, 15, 20 MHz.
---
--- [@WWVB@] Boulder (US) Radio 60 kHz.
---
--- [@WWVH@] Kaui Hawaii (US) Radio 2.5, 5, 10, 15 MHz.
---
--- [@CHU@]  Ottawa (Canada) Radio 3330, 7335, 14670 kHz.
---
--- [@LORC@] LORAN-C radionavigation system.
---
--- [@OMEG@] OMEGA radionavigation system.
---
--- [@GPS@]  Global Positioning System.
+-- For stratum 1 (reference clock), this is a four-octet,
+-- left-justified, zero-padded ASCII string assigned to the reference
+-- clock. The authoritative list of Reference Identifiers is maintained
+-- by IANA; however, any string beginning with the ASCII character "X"
+-- is reserved for unregistered experimentation and development. The
+-- identifiers below have been used as ASCII identifiers:
 --
 -- [@GOES@] Geostationary Orbit Environment Satellite.
 --
--- If the external reference is one of those listed, the associated
--- code should be used. Codes for sources not listed can be contrived as
--- appropriate.
+-- [@GPS@]  Global Positioning System.
+--
+-- [@GAL@]  Galileo Positioning System.
+--
+-- [@PPS@]  Generic pulse-per-second.
+--
+-- [@IRIG@] Inter-Range Instrumentation Group.
+--
+-- [@WWVB@] LF Radio WWVB Ft. Collins, CO 60 kHz
+--
+-- [@DCF@]  LF Radio DCF77 Mainflingen, DE 77.5 kHz
+--
+-- [@HBG@]  LF Radio HBG Prangins, HB 75 kHz
+--
+-- [@MSF@]  LF Radio MSF Anthorn, UK 60 kHz
+--
+-- [@JJY@]  LF Radio JJY Fukushima, JP 40 kHz, Saga, JP 60 kHz
+--
+-- [@LORC@] MF Radio LORAN C station, 100 kHz
+--
+-- [@TDF@]  MF Radio Allouis, FR 162 kHz
+--
+-- [@CHU@]  HF Radio CHU Ottawa, Ontario
+--
+-- [@WWV@]  HF Radio WWV Ft. Collins, CO
+--
+-- [@WWVH@] HF Radio WWVH Kauai, HI
+--
+-- [@NIST@] NIST telephone modem
+--
+-- [@ACTS@] NIST telephone modem
+--
+-- [@USNO@] USNO telephone modem
+--
+-- [@PTB@]  European telephone modem
+--
+-- Above stratum 1 (secondary servers and clients): this is the
+-- reference identifier of the server and can be used to detect timing
+-- loops. If using the IPv4 address family, the identifier is the
+-- four-octet IPv4 address. If using the IPv6 address family, it is the
+-- first four octets of the MD5 hash of the IPv6 address. Note that,
+-- when using the IPv6 address family on an NTPv4 server with a NTPv3
+-- client, the Reference Identifier field appears to be a random value
+-- and a timing loop might not be detected.
 type ReferenceId = Word32
 
 -- | An NTP timestamp. On the wire, timestamps are represented as a
@@ -289,17 +303,15 @@ getFlags :: Get (LeapIndicator, Version, Mode)
 getFlags = do
     lvm <- getWord8
     case unpackFlags lvm of
-        (Just l, Just v, Just m) -> return (l,v,m)
-        (Nothing, _, _) -> fail "invalid leap indicator"
+        (l, Just v, m)  -> return (l,v,m)
         (_, Nothing, _) -> fail "unknown NTP version"
-        (_, _, Nothing) -> fail "unknown message mode"
 
 packFlags :: LeapIndicator -> Version -> Mode -> Word8
 packFlags l v m = (fromLeap l `shiftL` 6)
-              + (fromVersion v `shiftL` 3)
-              + fromMode m
+                + (fromVersion v `shiftL` 3)
+                + fromMode m
 
-unpackFlags :: Word8 -> (Maybe LeapIndicator, Maybe Version, Maybe Mode)
+unpackFlags :: Word8 -> (LeapIndicator, Maybe Version, Mode)
 unpackFlags x = (l, v, m)
   where
     l = toLeap (x `shiftR` 6) -- bits 1-2
@@ -308,18 +320,20 @@ unpackFlags x = (l, v, m)
 
 fromLeap :: LeapIndicator -> Word8
 fromLeap x = case x of
-    NoWarning      -> 0
-    LastMinute61   -> 1
-    LastMinute59   -> 2
-    AlarmCondition -> 3
+    NoWarning    -> 0
+    LastMinute61 -> 1
+    LastMinute59 -> 2
+    Unknown      -> 3
 
-toLeap :: Word8 -> Maybe LeapIndicator
+toLeap :: Word8 -> LeapIndicator
 toLeap x = case x of
-    0 -> Just NoWarning
-    1 -> Just LastMinute61
-    2 -> Just LastMinute59
-    3 -> Just AlarmCondition
-    _ -> Nothing
+    0 -> NoWarning
+    1 -> LastMinute61
+    2 -> LastMinute59
+    3 -> Unknown
+    -- This should never happen as we don't export 'toLeap' and we only
+    -- ever actually pass it a 2-bit word.
+    _ -> error ("Network.NTP.Packet.toLeap: invalid leap indicator (" ++ show x ++ ")")
 
 fromVersion :: Version -> Word8
 fromVersion x = case x of
@@ -334,20 +348,28 @@ toVersion x = case x of
 
 fromMode :: Mode -> Word8
 fromMode x = case x of
+    Reserved         -> 0
     SymmetricActive  -> 1
     SymmetricPassive -> 2
     Client           -> 3
     Server           -> 4
     Broadcast        -> 5
+    Control          -> 6
+    Private          -> 7
 
-toMode :: Word8 -> Maybe Mode
+toMode :: Word8 -> Mode
 toMode x = case x of
-    1 -> Just SymmetricActive
-    2 -> Just SymmetricPassive
-    3 -> Just Client
-    4 -> Just Server
-    5 -> Just Broadcast
-    _ -> Nothing
+    0 -> Reserved
+    1 -> SymmetricActive
+    2 -> SymmetricPassive
+    3 -> Client
+    4 -> Server
+    5 -> Broadcast
+    6 -> Control
+    7 -> Private
+    -- This should never happen as we don't export 'toMode' and we only
+    -- ever actually pass it a 3-bit word.
+    _ -> error ("Network.NTP.Packet.toMode: invalid mode (" ++ show x ++ ")")
 
 ------------------------------------------------------------------------
 -- NTP Message Format
