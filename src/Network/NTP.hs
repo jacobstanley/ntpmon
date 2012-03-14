@@ -65,7 +65,7 @@ type ClockIndex = Word64
 data Clock = Clock {
       clockTime0      :: UTCTime
     , clockIndex0     :: ClockIndex
-    , clockFrequency  :: Word64
+    , clockFrequency  :: Double
     , clockPrecision  :: Word64
     , getCurrentIndex :: IO ClockIndex
     }
@@ -77,9 +77,9 @@ initCounterClock logger = do
 
     counter <- analyzeCounter
 
-    let clockFrequency = cntFrequency counter
+    let clockFrequency = fromIntegral (cntFrequency counter)
         clockPrecision = cntPrecision counter
-        freq = fromIntegral clockFrequency
+        freq = clockFrequency
         prec = fromIntegral clockPrecision / freq
 
     logger ("Frequency = " ++ showFreq freq)
@@ -97,28 +97,35 @@ getCurrentTime clock = clockTime clock <$> getCurrentIndex clock
 
 -- | Gets the time at the given index.
 clockTime :: Clock -> ClockIndex -> UTCTime
-clockTime Clock{..} index = clockTime0 `add` (diff / freq)
+clockTime Clock{..} index = clockTime0 `add` off
   where
+    off  = realToFrac (diff / freq)
     diff = fromIntegral (index - clockIndex0)
-    freq = fromIntegral clockFrequency
+    freq = clockFrequency
 
 -- | Gets the index at the given time.
 clockIndex :: Clock -> UTCTime -> ClockIndex
 clockIndex Clock{..} time = clockIndex0 + round (diff * freq)
   where
-    diff = time `sub` clockTime0
-    freq = fromIntegral clockFrequency
+    diff = realToFrac (time `sub` clockTime0)
+    freq = clockFrequency
 
 
 adjustFrequency :: Double -- ^ the drift rate in seconds/second
                 -> Clock -> Clock
 adjustFrequency adj c = c
-    { clockFrequency = round ((1 - adj) * fromIntegral (clockFrequency c)) }
+    { clockFrequency = (1 - adj) * clockFrequency c }
 
-adjustOffset :: Double -- ^ the offset in seconds
+adjustOffset :: NominalDiffTime -- ^ the offset in seconds
              -> Clock -> Clock
 adjustOffset adj c = c
-    { clockTime0 = clockTime0 c `add` realToFrac adj }
+    { clockTime0 = clockTime0 c `add` adj }
+
+adjustOrigin :: ClockIndex -- ^ the new clockIndex0
+             -> Clock -> Clock
+adjustOrigin newIndex0 c = c
+    { clockTime0  = clockTime c newIndex0
+    , clockIndex0 = newIndex0 }
 
 ------------------------------------------------------------------------
 -- Server
@@ -159,7 +166,7 @@ updateServer svr = do
         in (last samples) `seq` svr { svrRawSamples = samples }
 
 maxSamples :: Int
-maxSamples = 200
+maxSamples = 4 * 20
 
 adjustClock :: Server -> Clock -> Maybe Clock
 adjustClock Server{..} clock =
@@ -169,11 +176,15 @@ adjustClock Server{..} clock =
     --traceShow (clockTime0 clock') $
     --traceShow (clockFrequency clock') $
     --traceShow (off*1000000,freq*1000000) $
-    if length samples > 2
-    then Just clock'
+    if length svrRawSamples == maxSamples
+    then Just (adjust clock)
     else Nothing
   where
-    clock' = (adjustOffset off . adjustFrequency freq) clock
+    adjust = adjustOffset (realToFrac off)
+           . adjustFrequency freq
+           . adjustOrigin earliestRawTime
+
+    earliestRawTime = rawT1 (last svrRawSamples)
 
     samples      = extractBest svrRawSamples
     earliestTime = t1 (last samples)
@@ -260,7 +271,7 @@ clockFilter :: [Sample] -> Maybe Sample
 clockFilter = go . take window
   where
     -- number of samples to consider in the sliding window
-    window = 8
+    window = 4
 
     go xs = if length xs == window
             then (Just . head . sortBy (comparing delay)) xs
