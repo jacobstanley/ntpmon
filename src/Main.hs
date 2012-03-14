@@ -7,7 +7,6 @@ import Control.Applicative ((<$>))
 import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put)
-import Control.Monad (when)
 import Data.Maybe (fromJust)
 import Data.List (intercalate)
 import Data.Time.Clock hiding (getCurrentTime)
@@ -25,12 +24,14 @@ import Network.NTP
 main :: IO ()
 main = do
     hosts <- getArgs
-    if length hosts < 2
+    if length hosts < 1
        then putStr usage
        else do
-         (reference:servers) <- concat <$> mapM resolveServers hosts
          withNTP (hPutStrLn stderr) $ do
+            (reference:servers) <- resolve hosts
             monitor reference servers
+  where
+    resolve hosts = liftIO (concat <$> mapM resolveServers hosts)
 
 usage :: String
 usage = "ntp-monitor 0.3\n\
@@ -59,8 +60,11 @@ monitor ref ss = do
     headers = [("Unix Time", "Seconds Since 1970"), ("UTC Time", "UTC Time")]
            ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x)) servers
            ++ map (header "(ms)" (\x -> "Network Delay to " ++ x)) servers
-           -- ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (filtered)")) servers
-           -- ++ map (header "(ms)" (\x -> "network delay to " ++ x ++ " (filtered)")) servers
+           ++ [ ("clockTime0", "Seconds Since 1970")
+              , ("clockIndex0", "clocks")
+              , ("clockFrequency", "clocks/second") ]
+           ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (filtered)")) servers
+           ++ map (header "(ms)" (\x -> "Network Delay to " ++ x ++ " (filtered)")) servers
 
     header unit mkname s = (mkname (svrHostName s), unit)
 
@@ -74,12 +78,16 @@ monitorLoop syncCount ref ss = do
     -- sync clock with reference server
     mclock <- syncClockWith ref'
 
-    -- write samples to csv
-    when (syncCount > 2) $ liftIO $
-        writeSamples (fromJust mclock) (ref':ss')
-
-    -- sleep 1 sec before we update again
-    liftIO (threadDelay 1000000)
+    liftIO $
+        if (syncCount > 2)
+        -- we've been synchronized for two updates now
+        then do
+            -- write samples to csv
+            writeSamples (fromJust mclock) (ref':ss')
+            -- we're locked in, sleep one second before we update again
+            threadDelay 500000
+        else
+            threadDelay 25000
 
     let syncCount' = min 3 (syncCount + maybe 0 (const 1) mclock)
 
@@ -97,8 +105,8 @@ syncClockWith server = do
 writeSamples :: Clock -> [Server] -> IO ()
 writeSamples clock servers = putStrLn (intercalate "," fields)
   where
-    fields = [unixTime, utcTime] ++ offsets ++ delays
-    --      ++ filteredOffsets ++ filteredDelays
+    fields = [unixTime, utcTime] ++ offsets ++ delays ++ [time0, index0, freq]
+          ++ filteredOffsets ++ filteredDelays
 
     svrSamples = map (reify clock) . svrRawSamples
 
@@ -106,13 +114,17 @@ writeSamples clock servers = putStrLn (intercalate "," fields)
     offsets = map (showMilli . offset) samples
     delays  = map (showMilli . delay) samples
 
-    --filteredSamples = map (clockFilter . svrSamples) servers
-    --filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
-    --filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
+    filteredSamples = map (clockFilter . svrSamples) servers
+    filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
+    filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
 
     utc4     = t4 (head samples)
     utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc4
     unixTime = (init . show) (utcTimeToPOSIXSeconds utc4)
+
+    time0  = (init . show . utcTimeToPOSIXSeconds . clockTime0) clock
+    index0 = (show . clockIndex0) clock
+    freq   = (show . clockFrequency) clock
 
 showMilli :: NominalDiffTime -> String
 showMilli t = printf "%.4f" ms
