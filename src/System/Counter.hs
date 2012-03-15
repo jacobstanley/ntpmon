@@ -45,7 +45,7 @@ readCounter = rdtsc
 -- precision.
 analyzeCounter :: IO CounterInfo
 analyzeCounter = do
-    cntFrequency <- analyzeFrequency 5
+    cntFrequency <- analyzeFrequency 1
     cntPrecision <- analyzePrecision
     return CounterInfo{..}
 
