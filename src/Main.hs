@@ -82,10 +82,11 @@ monitorLoop syncCount ref ss = do
         then do
             -- write samples to csv
             writeSamples (fromJust mclock) (ref':ss')
-            -- we're locked in, sleep one second before we update again
-            threadDelay 500000
+            -- we're locked in, sleep 1s before we update again
+            threadDelay 1000000
         else
-            threadDelay 25000
+            -- only sleep for 50ms, we need some more samples
+            threadDelay 50000
 
     let syncCount' = min 3 (syncCount + maybe 0 (const 1) mclock)
 
