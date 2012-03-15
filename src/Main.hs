@@ -52,7 +52,7 @@ monitor ref ss = do
         (putStrLn . intercalate "," . map fst) headers
         (putStrLn . intercalate "," . map snd) headers
 
-    monitorLoop 0 ref ss
+    monitorLoop ref ss
   where
     servers = ref:ss
     refName = svrHostName ref
@@ -67,8 +67,8 @@ monitor ref ss = do
     header unit mkname s = (mkname (svrHostName s), unit)
 
 
-monitorLoop :: Int -> Server -> [Server] -> NTP ()
-monitorLoop syncCount ref ss = do
+monitorLoop :: Server -> [Server] -> NTP ()
+monitorLoop ref ss = do
     -- update servers
     ref' <- updateServer ref
     ss'  <- mapM updateServer ss
@@ -76,21 +76,21 @@ monitorLoop syncCount ref ss = do
     -- sync clock with reference server
     mclock <- syncClockWith ref'
 
-    liftIO $
-        if (syncCount > 2)
-        -- we've been synchronized for two updates now
-        then do
+    case mclock of
+        -- we're synchronized
+        Just clock -> liftIO $ do
             -- write samples to csv
             writeSamples (fromJust mclock) (ref':ss')
-            -- we're locked in, sleep 1s before we update again
+            -- sleep 1s before we update again
             threadDelay 1000000
-        else
+
+        -- we're not synchronized
+        Nothing -> liftIO $ do
             -- only sleep for 50ms, we need some more samples
             threadDelay 50000
 
-    let syncCount' = min 3 (syncCount + maybe 0 (const 1) mclock)
 
-    monitorLoop syncCount' ref' ss'
+    monitorLoop ref' ss'
 
 syncClockWith :: Server -> NTP (Maybe Clock)
 syncClockWith server = do
