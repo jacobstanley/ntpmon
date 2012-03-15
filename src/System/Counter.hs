@@ -15,7 +15,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import Data.Word (Word64)
 
 #ifdef QPC
-import System.Win32.Time (queryPerformanceCounter)
+import System.Win32.Time (queryPerformanceCounter, queryPerformanceFrequency)
 #else
 import System.CPUTime.Rdtsc (rdtsc)
 #endif
@@ -45,7 +45,11 @@ readCounter = rdtsc
 -- precision.
 analyzeCounter :: IO CounterInfo
 analyzeCounter = do
-    cntFrequency <- analyzeFrequency 1
+#ifdef QPC
+    cntFrequency <- fromIntegral `fmap` queryPerformanceFrequency
+#else
+    cntFrequency <- analyzeFrequency 5
+#endif
     cntPrecision <- analyzePrecision
     return CounterInfo{..}
 
