@@ -166,7 +166,7 @@ updateServer svr = do
         in (last samples) `seq` svr { svrRawSamples = samples }
 
 maxSamples :: Int
-maxSamples = 4 * 20
+maxSamples = 8 * 100
 
 adjustClock :: Server -> Clock -> Maybe Clock
 adjustClock Server{..} clock =
@@ -181,7 +181,7 @@ adjustClock Server{..} clock =
     else Nothing
   where
     adjust = adjustOffset (realToFrac off)
-           . adjustFrequency freq
+           . adjustFrequency (freq * 0.5)
            . adjustOrigin earliestRawTime
 
     earliestRawTime = rawT1 (last svrRawSamples)
@@ -271,7 +271,7 @@ clockFilter :: [Sample] -> Maybe Sample
 clockFilter = go . take window
   where
     -- number of samples to consider in the sliding window
-    window = 4
+    window = 8
 
     go xs = if length xs == window
             then (Just . head . sortBy (comparing delay)) xs
