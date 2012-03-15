@@ -60,11 +60,9 @@ monitor ref ss = do
     headers = [("Unix Time", "Seconds Since 1970"), ("UTC Time", "UTC Time")]
            ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x)) servers
            ++ map (header "(ms)" (\x -> "Network Delay to " ++ x)) servers
-           ++ [ ("clockTime0", "Seconds Since 1970")
-              , ("clockIndex0", "clocks")
-              , ("clockFrequency", "clocks/second") ]
-           ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (filtered)")) servers
-           ++ map (header "(ms)" (\x -> "Network Delay to " ++ x ++ " (filtered)")) servers
+           ++ [ ("High Precision Counter Frequency", "(Hz)") ]
+          -- ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (filtered)")) servers
+          -- ++ map (header "(ms)" (\x -> "Network Delay to " ++ x ++ " (filtered)")) servers
 
     header unit mkname s = (mkname (svrHostName s), unit)
 
@@ -105,8 +103,8 @@ syncClockWith server = do
 writeSamples :: Clock -> [Server] -> IO ()
 writeSamples clock servers = putStrLn (intercalate "," fields)
   where
-    fields = [unixTime, utcTime] ++ offsets ++ delays ++ [time0, index0, freq]
-          ++ filteredOffsets ++ filteredDelays
+    fields = [unixTime, utcTime] ++ offsets ++ delays ++ [freq]
+    --      ++ filteredOffsets ++ filteredDelays
 
     svrSamples = map (reify clock) . svrRawSamples
 
@@ -114,16 +112,14 @@ writeSamples clock servers = putStrLn (intercalate "," fields)
     offsets = map (showMilli . offset) samples
     delays  = map (showMilli . delay) samples
 
-    filteredSamples = map (clockFilter . svrSamples) servers
-    filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
-    filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
+    --filteredSamples = map (clockFilter . svrSamples) servers
+    --filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
+    --filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
 
     utc4     = t4 (head samples)
     utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc4
     unixTime = (init . show) (utcTimeToPOSIXSeconds utc4)
 
-    time0  = (init . show . utcTimeToPOSIXSeconds . clockTime0) clock
-    index0 = (show . clockIndex0) clock
     freq   = (show . clockFrequency) clock
 
 showMilli :: NominalDiffTime -> String
