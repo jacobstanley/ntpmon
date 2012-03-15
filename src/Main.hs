@@ -34,7 +34,7 @@ main = do
     resolve hosts = liftIO (concat <$> mapM resolveServers hosts)
 
 usage :: String
-usage = "ntp-monitor 0.3\n\
+usage = "ntp-monitor 0.4\n\
 \Usage: ntp-monitor REFERENCE [SERVER]..\
 \\n\
 \\n  REFERENCE  The NTP server which the other servers will be measured\
