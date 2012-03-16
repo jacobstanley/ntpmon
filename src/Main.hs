@@ -7,9 +7,8 @@ import Control.Applicative ((<$>))
 import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put)
-import Data.Maybe (fromJust)
 import Data.List (intercalate)
-import Data.Time.Clock hiding (getCurrentTime)
+-- import Data.Time.Clock hiding (getCurrentTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format
 import System.Environment (getArgs)
@@ -58,6 +57,7 @@ monitor ref ss = do
     refName = svrHostName ref
 
     headers = [("Unix Time", "Seconds Since 1970"), ("UTC Time", "UTC Time")]
+           ++ [("Filtered Offset", "(ms)")]
            ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x)) servers
            ++ map (header "(ms)" (\x -> "Network Delay to " ++ x)) servers
            ++ [ ("High Precision Counter Frequency", "(Hz)") ]
@@ -78,52 +78,54 @@ monitorLoop ref ss = do
 
     case mclock of
         -- we're synchronized
-        Just clock -> liftIO $ do
+        Just (clock, off) -> liftIO $ do
             -- write samples to csv
-            writeSamples (fromJust mclock) (ref':ss')
+            writeSamples clock (ref':ss') off
             -- sleep 1s before we update again
             threadDelay 1000000
 
         -- we're not synchronized
         Nothing -> liftIO $ do
-            -- only sleep for 50ms, we need some more samples
-            threadDelay 50000
+            -- only sleep for 1000ms, we need some more samples
+            threadDelay 1000000
 
 
     monitorLoop ref' ss'
 
-syncClockWith :: Server -> NTP (Maybe Clock)
+syncClockWith :: Server -> NTP (Maybe (Clock, Seconds))
 syncClockWith server = do
     ntp@NTPData{..} <- get
     let mclock = adjustClock server ntpClock
     case mclock of
-        Nothing    -> return ()
-        Just clock -> put ntp { ntpClock = clock }
+        Nothing         -> return ()
+        Just (clock, _) -> put ntp { ntpClock = clock }
     return mclock
 
-writeSamples :: Clock -> [Server] -> IO ()
-writeSamples clock servers = putStrLn (intercalate "," fields)
+writeSamples :: Clock -> [Server] -> Seconds -> IO ()
+writeSamples clock servers off = putStrLn (intercalate "," fields)
   where
-    fields = [unixTime, utcTime] ++ offsets ++ delays ++ [freq]
+    fields = [unixTime, utcTime, offMs] ++ offsets ++ delays ++ [freq]
     --      ++ filteredOffsets ++ filteredDelays
 
-    svrSamples = map (reify clock) . svrRawSamples
+    offMs = printf "%.9f" (off * 1000)
 
-    samples = map (head . svrSamples) servers
-    offsets = map (showMilli . offset) samples
-    delays  = map (showMilli . delay) samples
+    -- svrSamples = map (oldReify clock) . svrRawSamples
+
+    samples = map (head . svrRawSamples) servers
+    offsets = map (showMilli . offset clock) samples
+    delays  = map (showMilli . fromDiff clock . roundtrip) samples
 
     --filteredSamples = map (clockFilter . svrSamples) servers
     --filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
     --filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
 
-    utc4     = t4 (head samples)
+    utc4     = clockTime clock (rawT4 (head samples))
     utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc4
     unixTime = (init . show) (utcTimeToPOSIXSeconds utc4)
 
     freq   = (show . clockFrequency) clock
 
-showMilli :: NominalDiffTime -> String
+showMilli :: Seconds -> String
 showMilli t = printf "%.4f" ms
   where
     ms = (1000 :: Double) * (realToFrac t)
