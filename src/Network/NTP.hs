@@ -9,13 +9,15 @@
 module Network.NTP where
 
 import           Control.Applicative ((<$>))
+import           Control.Concurrent (forkIO)
+import           Control.Concurrent.STM.TChan
 import           Control.Exception (IOException, bracket, handle)
 import           Control.Monad.IO.Class
+import           Control.Monad.Loops (unfoldM)
+import           Control.Monad.STM (atomically)
 import           Control.Monad.State
 import           Data.List (sortBy)
---import           Data.List (nub, sortBy, tails)
 import           Data.Ord (comparing)
---import           Data.Maybe (mapMaybe)
 import           Data.Serialize (encode, decode)
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, diffUTCTime)
 import qualified Data.Time.Clock as T
@@ -23,8 +25,7 @@ import qualified Data.Vector.Unboxed as V
 import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
---import           Statistics.LinearRegression (linearRegression)
-import           Statistics.Sample (mean, meanWeighted)
+import           Statistics.Sample (meanWeighted)
 
 import           Data.NTP hiding (Server)
 import           System.Counter
@@ -39,10 +40,12 @@ newtype NTP a = NTP { runNTP :: StateT NTPData IO a }
     deriving (Functor, Monad, MonadIO, MonadState NTPData)
 
 data NTPData = NTPData {
-      ntpSocket :: Socket
-    , ntpClock  :: Clock
+      ntpSocket   :: Socket
+    , ntpClock    :: Clock
+    , ntpIncoming :: TChan AddrSample
     }
 
+type AddrSample = (SockAddr, Sample)
 type Logger = String -> IO ()
 
 withNTP :: Logger -> NTP a -> IO a
@@ -50,10 +53,16 @@ withNTP logger =
     fmap fst . withSocketsDo . bracket create destroy . runStateT . runNTP
   where
     create = do
-        ntpSocket <- socket AF_INET Datagram defaultProtocol
-        -- set timeout to 1000ms, this is the minimum
-        setSocketOption ntpSocket RecvTimeOut 1000
-        ntpClock  <- initCounterClock logger
+        ntpSocket   <- socket AF_INET Datagram defaultProtocol
+        ntpClock    <- initCounterClock logger
+        ntpIncoming <- newTChanIO
+
+        -- receive packet loop
+        let getClock = getCurrentIndex ntpClock
+        forkIO $ forever $ do
+            pkt <- receive ntpSocket getClock
+            either logger (atomically . writeTChan ntpIncoming) pkt
+
         return NTPData{..}
 
     destroy NTPData{..} = sClose ntpSocket
@@ -170,43 +179,94 @@ resolveServers host = map (mkServer . addrAddress) <$> getHostAddrInfo
     hints = Just defaultHints { addrFamily     = AF_INET
                               , addrSocketType = Datagram }
 
-updateServer :: Server -> NTP Server
-updateServer svr = do
+transmit :: Server -> NTP ()
+transmit Server{..} = do
     NTPData{..} <- get
-    transmit svr
-    either (const svr) (withSample ntpClock) <$> receive
+    liftIO $ do
+        now <- getCurrentIndex ntpClock
+        let msg = (encode . requestMsg . toTimestamp) now
+        sendAllTo ntpSocket msg svrAddress
+
+receive :: Socket -> IO ClockIndex -> IO (Either String AddrSample)
+receive sock getClock = handleIOErrors $ do
+    (bs, addr) <- recvFrom sock 128
+    t          <- getClock
+    return $ case decode bs of
+        Left err  -> Left err
+        Right pkt -> Right (addr, mkSample t pkt)
   where
-    withSample clock s = svr {
-        -- force the evaluation of the last sample in the list
-        -- to avoid building up lots of unevaluated thunks
-          svrRawSamples = let xs = take maxSamples (s : svrRawSamples svr)
-                          in last xs `seq` xs
+    handleIOErrors = handle (\(e :: IOException) -> return (Left (show e)))
 
-        -- the first sample should be saves as svrRawSample0
-        , svrRawSample0 = if null (svrRawSamples svr)
-                          then s else (svrRawSample0 svr)
+    mkSample t4 Packet{..} = Sample
+        { rawT1 = fromTimestamp ntpT1
+        , rawT2 = fromTimestamp ntpT2
+        , rawT3 = fromTimestamp ntpT3
+        , rawT4 = t4 }
 
-        -- the last sample
-        , svrRawSampleN = if withinError clock svr s
-                          then s else (svrRawSampleN svr)
+updateServers :: [Server] -> NTP [Server]
+updateServers svrs = do
+    NTPData{..} <- get
+    liftIO $ do
+        pkts <- unfoldM (tryReadChan ntpIncoming)
+        trace (unwords $ map (show . fst) pkts) $ return (map (update ntpClock pkts) svrs)
+  where
+    update :: Clock -> [AddrSample] -> Server -> Server
+    update clock = fconcat . map go
+      where
+        go (addr, s) svr
+          | addr == svrAddress svr = updateServer clock svr s
+          | otherwise              = svr
 
-        -- see if we have a new winner for minimum round-trip time
-        , svrMinRoundtrip = let x = min (roundtrip s) (svrMinRoundtrip svr)
-                            in if x < svrMinRoundtrip svr
-                               then traceShow (fromIntegral x / clockFrequency clock) x
-                               else x
-        }
+    fconcat :: [a -> a] -> a -> a
+    fconcat = foldl (.) id
+
+    tryReadChan chan = atomically $ do
+        empty <- isEmptyTChan chan
+        if empty then return Nothing
+                 else Just <$> readTChan chan
+
+updateServer :: Clock -> Server -> Sample -> Server
+updateServer clock svr s = updateSampleN $ svr {
+    -- force the evaluation of the last sample in the list
+    -- to avoid building up lots of unevaluated thunks
+      svrRawSamples = let xs = take maxSamples (s : svrRawSamples svr)
+                      in last xs `seq` xs
+
+    -- the first sample should be saved as svrRawSample0
+    , svrRawSample0 = if null (svrRawSamples svr)
+                      then let x = fudgeFrequencyEstimate clock s 20 in traceShow x x
+                      else (svrRawSample0 svr)
+
+    -- see if we have a new winner for minimum round-trip time
+    , svrMinRoundtrip = let x = min (roundtrip s) (svrMinRoundtrip svr)
+                        in if x < svrMinRoundtrip svr
+                           then trace ("New Min: " ++ show (fromIntegral x / clockFrequency clock)) x
+                           else x
+    }
+  where
+    updateSampleN svr' =
+        svr' { svrRawSampleN = if withinError clock svr s
+                               then s else (svrRawSampleN svr) }
+
+
+-- | Assumes the current frequency is the average of the last x seconds.
+fudgeFrequencyEstimate :: Clock -> Sample -> Seconds -> Sample
+fudgeFrequencyEstimate clock s nsecs = s
+    { rawT1 = rawT1 s - round (nsecs * clockFrequency clock)
+    , rawT2 = rawT2 s `add` realToFrac (-nsecs) }
+
 
 maxSamples :: Int
-maxSamples = 1000 * samplesPerSecond
+maxSamples = 500 * samplesPerSecond
 
 samplesPerSecond :: Int
 samplesPerSecond = 1
 
 adjustClock :: Server -> Clock -> Maybe (Clock, Seconds)
 adjustClock svr@Server{..} clock =
-    --traceShow (length samples) $
-    --traceShow (mean offsets) $
+    traceShow t2Diff $
+    traceShow t1Diff $
+    traceShow freq $
     --traceShow (mean times) $
     --traceShow (clockTime0 clock') $
     --traceShow (clockFrequency clock') $
@@ -217,14 +277,15 @@ adjustClock svr@Server{..} clock =
   where
     adjust = adjustOffset (let x = realToFrac off in traceShow (x * 1000000) x)
            . setFrequency freq
-           -- . adjustOrigin earliestRawTime
+           . adjustOrigin earliestRawTime
 
-    --earliestRawTime = rawT1 (last svrRawSamples)
+    earliestRawTime = rawT1 (last svrRawSamples)
 
     off     = meanWeighted (V.zip offsets weights)
-    -- off     = mean offsets
     offsets = doubleVector (offset clock) svrRawSamples
     weights = doubleVector (quality clock svr) svrRawSamples
+    -- errors = doubleVector ((* 1000) . initialError clock svr) svrRawSamples
+    -- roundtrips = doubleVector ((* 1000) . fromDiff clock . roundtrip) svrRawSamples
 
     freq   = t1Diff / t2Diff
     t2Diff = realToFrac (rawT2 svrRawSampleN `sub` rawT2 svrRawSample0)
@@ -235,33 +296,6 @@ adjustClock svr@Server{..} clock =
 
     doubleVector :: (a -> Double) -> [a] -> V.Vector Double
     doubleVector f = V.fromList . map f
-
-
-transmit :: Server -> NTP ()
-transmit Server{..} = do
-    NTPData{..} <- get
-    liftIO $ do
-        now <- getCurrentIndex ntpClock
-        let msg = (encode . requestMsg . toTimestamp) now
-        sendAllTo ntpSocket msg svrAddress
-
-receive :: NTP (Either String Sample)
-receive = do
-    NTPData{..} <- get
-    liftIO $ do
-        mbs <- (handleIOErrors . fmap Just . recvFrom ntpSocket) 128
-        t   <- getCurrentIndex ntpClock
-        return $ case mbs of
-            Nothing          -> Left "Timed out"
-            Just (bs, _addr) -> mkSample t <$> decode bs
-  where
-    handleIOErrors = handle (\(_ :: IOException) -> return Nothing)
-
-    mkSample t4 Packet{..} = Sample
-        { rawT1 = fromTimestamp ntpT1
-        , rawT2 = fromTimestamp ntpT2
-        , rawT3 = fromTimestamp ntpT3
-        , rawT4 = t4 }
 
 ------------------------------------------------------------------------
 -- Samples
@@ -307,9 +341,10 @@ currentError clock svr s = initial + drift * age
     drift = 1 / 10000000 -- 0.1 ppm
 
 withinError :: Clock -> Server -> Sample -> Bool
-withinError clock svr = (< allowedError) . initialError clock svr
+withinError clock svr = (< allowedError) . go . initialError clock svr
   where
-    allowedError = 5 * estimatedHostDelay
+    allowedError = 20 * estimatedHostDelay
+    go x = trace ("Min: " ++ show (svrMinRoundtrip svr) ++ "  Error: " ++ show x ++ "s  (Allowed: " ++ show allowedError ++ "s)") x
 
 estimatedHostDelay :: Double
 estimatedHostDelay = 15 / 1000 / 1000 -- 15 usec

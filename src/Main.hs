@@ -69,26 +69,24 @@ monitor ref ss = do
 
 monitorLoop :: Server -> [Server] -> NTP ()
 monitorLoop ref ss = do
-    -- update servers
-    ref' <- updateServer ref
-    ss'  <- mapM updateServer ss
+    -- send requests to servers
+    mapM transmit (ref:ss)
+
+    -- wait for replies
+    liftIO (threadDelay 1000000)
+
+    -- update any servers which received replies
+    (ref':ss') <- updateServers (ref:ss)
 
     -- sync clock with reference server
     mclock <- syncClockWith ref'
 
-    case mclock of
-        -- we're synchronized
-        Just (clock, off) -> liftIO $ do
-            -- write samples to csv
+    -- check if we're synchronized
+    liftIO $ case mclock of
+        Nothing -> return ()
+        Just (clock, off) -> do
+            -- we are, so write samples to csv
             writeSamples clock (ref':ss') off
-            -- sleep 1s before we update again
-            threadDelay 1000000
-
-        -- we're not synchronized
-        Nothing -> liftIO $ do
-            -- only sleep for 1000ms, we need some more samples
-            threadDelay 1000000
-
 
     monitorLoop ref' ss'
 
@@ -102,9 +100,16 @@ syncClockWith server = do
     return mclock
 
 writeSamples :: Clock -> [Server] -> Seconds -> IO ()
-writeSamples clock servers off = putStrLn (intercalate "," fields)
+writeSamples clock servers off = do
+    utc <- getCurrentTime clock
+
+    let utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc
+        unixTime = (init . show) (utcTimeToPOSIXSeconds utc)
+        index    = [unixTime, utcTime]
+
+    putStrLn (intercalate "," (index ++ fields))
   where
-    fields = [unixTime, utcTime, offMs] ++ offsets ++ delays ++ [freq]
+    fields = [offMs] ++ offsets ++ delays ++ [freq]
     --      ++ filteredOffsets ++ filteredDelays
 
     offMs = printf "%.9f" (off * 1000)
@@ -119,11 +124,7 @@ writeSamples clock servers off = putStrLn (intercalate "," fields)
     --filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
     --filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
 
-    utc4     = clockTime clock (rawT4 (head samples))
-    utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc4
-    unixTime = (init . show) (utcTimeToPOSIXSeconds utc4)
-
-    freq   = (show . clockFrequency) clock
+    freq = (show . clockFrequency) clock
 
 showMilli :: Seconds -> String
 showMilli t = printf "%.4f" ms
