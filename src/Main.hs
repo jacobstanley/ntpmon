@@ -118,7 +118,7 @@ writeSamples clock servers off = do
     samples = map (head . svrRawSamples) servers
     offsets = map (showMilli . offset clock) samples
     delays  = map (showMilli . fromDiff clock . roundtrip) samples
-    errors  = map (showMilli . uncurry (currentError clock)) (zip servers samples)
+    errors  = map (showMilli . (/10) . uncurry (currentError clock)) (zip servers samples)
 
 showMilli :: Seconds -> String
 showMilli t = printf "%.4f" ms
