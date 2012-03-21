@@ -74,7 +74,7 @@ monitorLoop ref ss = do
     mapM transmit (ref:ss)
 
     -- wait for replies
-    liftIO (threadDelay (1000000 `div` samplesPerSecond))
+    liftIO $ threadDelay $ round (1000000 / samplesPerSecond)
 
     -- update any servers which received replies
     (ref':ss') <- updateServers (ref:ss)

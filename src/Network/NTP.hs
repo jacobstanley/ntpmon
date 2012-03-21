@@ -251,13 +251,13 @@ maxSamples :: Int
 maxSamples = max phaseSamples freqSamples
 
 freqSamples :: Int
-freqSamples = 1000 * samplesPerSecond
+freqSamples = round (1000 * samplesPerSecond)
 
 phaseSamples :: Int
-phaseSamples = 10 * samplesPerSecond
+phaseSamples = round (60 * samplesPerSecond)
 
-samplesPerSecond :: Int
-samplesPerSecond = 1
+samplesPerSecond :: Double
+samplesPerSecond = 0.5
 
 adjustClock :: Server -> Clock -> Maybe (Clock, Seconds)
 adjustClock svr@Server{..} clock =
