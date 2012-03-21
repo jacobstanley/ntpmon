@@ -248,45 +248,40 @@ fudgeFrequencyEstimate clock s nsecs = s
 
 
 maxSamples :: Int
-maxSamples = 50 * samplesPerSecond
+maxSamples = max phaseSamples freqSamples
+
+freqSamples :: Int
+freqSamples = 1000 * samplesPerSecond
+
+phaseSamples :: Int
+phaseSamples = 10 * samplesPerSecond
 
 samplesPerSecond :: Int
 samplesPerSecond = 1
 
 adjustClock :: Server -> Clock -> Maybe (Clock, Seconds)
 adjustClock svr@Server{..} clock =
-    traceShow off $
+    traceShow phase $
     traceShow freq $
     if length svrRawSamples > 5
-    then Just (adjust clock, off)
+    then Just (adjust clock, phase)
     else Nothing
   where
-    adjust = adjustOffset (realToFrac off)
+    adjust = adjustOffset (realToFrac phase)
            . adjustFrequency freq
            . adjustOrigin earliestTime
 
-    --latestSample   = head svrRawSamples
     earliestSample = last svrRawSamples
     earliestTime   = rawT1 earliestSample
 
-    (off, freq) = linearRegression times weightedOffsets
+    phase     = S.meanWeighted (V.take phaseSamples weightedOffsets)
+    (_, freq) = linearRegression (V.take freqSamples times)
+                                 (V.take freqSamples weightedOffsets)
 
     weightedOffsets = V.zip offsets weights
     times   = doubleVector (fromDiff clock . (\x -> rawT4 x - earliestTime)) svrRawSamples
     offsets = doubleVector (offset clock) svrRawSamples
     weights = doubleVector (quality clock svr) svrRawSamples
-
-    --off     = meanWeighted (V.zip offsets weights)
-
-    -- errors = doubleVector ((* 1000) . initialError clock svr) svrRawSamples
-    -- roundtrips = doubleVector ((* 1000) . fromDiff clock . roundtrip) svrRawSamples
-
-    --freq   = t1Diff / t2Diff
-    --t2Diff = realToFrac (rawT2 svrRawSampleN `sub` rawT2 svrRawSample0)
-    --t1Diff = fromIntegral (rawT1 svrRawSampleN - rawT1 svrRawSample0)
-
-    --t2Diff = realToFrac (rawT2 latestSample `sub` rawT2 earliestSample)
-    --t1Diff = fromIntegral (rawT1 latestSample - rawT1 earliestSample)
 
     doubleVector :: (a -> Double) -> [a] -> V.Vector Double
     doubleVector f = V.fromList . map f
@@ -334,7 +329,7 @@ quality clock svr s = exp (-x*x)
     x = sampleError / baseError
 
     sampleError = currentError clock svr s
-    baseError   = 2 * estimatedHostDelay
+    baseError   = 4 * estimatedHostDelay
 
 initialError :: Clock -> Server -> Sample -> Seconds
 initialError clock Server{..} s = fromDiff clock (roundtrip s - svrMinRoundtrip)
