@@ -53,7 +53,7 @@ withNTP logger =
     fmap fst . withSocketsDo . bracket create destroy . runStateT . runNTP
   where
     create = do
-        ntpSocket   <- socket AF_INET Datagram defaultProtocol
+        ntpSocket   <- initSocket
         ntpClock    <- initCounterClock logger
         ntpIncoming <- newTChanIO
 
@@ -66,6 +66,11 @@ withNTP logger =
         return NTPData{..}
 
     destroy NTPData{..} = sClose ntpSocket
+
+    initSocket = do
+        sock <- socket AF_INET Datagram defaultProtocol
+        bindSocket sock (SockAddrInet 0 0)
+        return sock
 
 ------------------------------------------------------------------------
 -- Clock

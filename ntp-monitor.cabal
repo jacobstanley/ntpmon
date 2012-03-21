@@ -43,7 +43,7 @@ executable ntp-monitor
     -fprof-auto
 
   ghc-options:
-    -O2 -Wall -rtsopts
+    -O2 -Wall -rtsopts -threaded
     -funbox-strict-fields
     -fno-warn-unused-do-bind
     -fno-warn-orphans
