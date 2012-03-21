@@ -25,7 +25,7 @@ import qualified Data.Vector.Unboxed as V
 import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
-import           Statistics.Sample (meanWeighted)
+import qualified Statistics.Sample as S
 
 import           Data.NTP hiding (Server)
 import           System.Counter
@@ -262,45 +262,65 @@ fudgeFrequencyEstimate clock s nsecs = s
 
 
 maxSamples :: Int
-maxSamples = 500 * samplesPerSecond
+maxSamples = 200 * samplesPerSecond
 
 samplesPerSecond :: Int
 samplesPerSecond = 1
 
 adjustClock :: Server -> Clock -> Maybe (Clock, Seconds)
 adjustClock svr@Server{..} clock =
-    traceShow t2Diff $
-    traceShow t1Diff $
+    traceShow off $
     traceShow freq $
-    --traceShow (mean times) $
-    --traceShow (clockTime0 clock') $
-    --traceShow (clockFrequency clock') $
-    --traceShow (off*1000000,freq*1000000) $
     if length svrRawSamples > 5
     then Just (adjust clock, off)
     else Nothing
   where
-    adjust = adjustOffset (let x = realToFrac off in traceShow (x * 1000000) x)
-           . setFrequency freq
-           . adjustOrigin earliestRawTime
+    adjust = adjustOffset (realToFrac off)
+           . adjustFrequency freq
+           . adjustOrigin earliestTime
 
-    earliestRawTime = rawT1 (last svrRawSamples)
+    --latestSample   = head svrRawSamples
+    earliestSample = last svrRawSamples
+    earliestTime   = rawT1 earliestSample
 
-    off     = meanWeighted (V.zip offsets weights)
+    (off, freq) = linearRegression times weightedOffsets
+
+    weightedOffsets = V.zip offsets weights
+    times   = doubleVector (fromDiff clock . (\x -> rawT4 x - earliestTime)) svrRawSamples
     offsets = doubleVector (offset clock) svrRawSamples
     weights = doubleVector (quality clock svr) svrRawSamples
+
+    --off     = meanWeighted (V.zip offsets weights)
+
     -- errors = doubleVector ((* 1000) . initialError clock svr) svrRawSamples
     -- roundtrips = doubleVector ((* 1000) . fromDiff clock . roundtrip) svrRawSamples
 
-    freq   = t1Diff / t2Diff
-    t2Diff = realToFrac (rawT2 svrRawSampleN `sub` rawT2 svrRawSample0)
-    t1Diff = fromIntegral (rawT1 svrRawSampleN - rawT1 svrRawSample0)
+    --freq   = t1Diff / t2Diff
+    --t2Diff = realToFrac (rawT2 svrRawSampleN `sub` rawT2 svrRawSample0)
+    --t1Diff = fromIntegral (rawT1 svrRawSampleN - rawT1 svrRawSample0)
 
-    --samples = extractBest svrRawSamples
-    --extractBest = nub . mapMaybe clockFilter . tails . map (oldReify clock)
+    --t2Diff = realToFrac (rawT2 latestSample `sub` rawT2 earliestSample)
+    --t1Diff = fromIntegral (rawT1 latestSample - rawT1 earliestSample)
 
     doubleVector :: (a -> Double) -> [a] -> V.Vector Double
     doubleVector f = V.fromList . map f
+
+-- | Simple linear regression between 2 samples.
+--   Takes two vectors Y={yi} and X={xi} and returns
+--   (alpha, beta, r*r) such that Y = alpha + beta*X
+linearRegression :: S.Sample -> S.WeightedSample -> (Double, Double)
+linearRegression xs ys = (alpha, beta)
+  where
+    !c     = V.sum (V.zipWith (*) (V.map (subtract mx) xs) (V.map (subtract my . fst) ys)) / (n-1)
+    !r     = c / (sx * sy)
+    !mx    = S.mean xs
+    !my    = S.meanWeighted ys
+    !sx    = S.stdDev xs
+    !sy    = sqrt (S.varianceWeighted ys)
+    !n     = fromIntegral (V.length xs)
+    !beta  = r * sy / sx
+    !alpha = my - beta * mx
+{-# INLINE linearRegression #-}
 
 ------------------------------------------------------------------------
 -- Samples

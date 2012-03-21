@@ -60,6 +60,7 @@ monitor ref ss = do
            ++ [("Filtered Offset", "(ms)")]
            ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x)) servers
            ++ map (header "(ms)" (\x -> "Network Delay to " ++ x)) servers
+           ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (error)")) servers
            ++ [ ("High Precision Counter Frequency", "(Hz)") ]
           -- ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (filtered)")) servers
           -- ++ map (header "(ms)" (\x -> "Network Delay to " ++ x ++ " (filtered)")) servers
@@ -109,22 +110,15 @@ writeSamples clock servers off = do
 
     putStrLn (intercalate "," (index ++ fields))
   where
-    fields = [offMs] ++ offsets ++ delays ++ [freq]
-    --      ++ filteredOffsets ++ filteredDelays
+    fields = [offMs] ++ offsets ++ delays ++ errors ++ [freq]
 
     offMs = printf "%.9f" (off * 1000)
-
-    -- svrSamples = map (oldReify clock) . svrRawSamples
+    freq = (show . clockFrequency) clock
 
     samples = map (head . svrRawSamples) servers
     offsets = map (showMilli . offset clock) samples
     delays  = map (showMilli . fromDiff clock . roundtrip) samples
-
-    --filteredSamples = map (clockFilter . svrSamples) servers
-    --filteredOffsets = map (maybe "_" showMilli . fmap offset) filteredSamples
-    --filteredDelays  = map (maybe "_" showMilli . fmap delay) filteredSamples
-
-    freq = (show . clockFrequency) clock
+    errors  = map (showMilli . uncurry (currentError clock)) (zip servers samples)
 
 showMilli :: Seconds -> String
 showMilli t = printf "%.4f" ms
