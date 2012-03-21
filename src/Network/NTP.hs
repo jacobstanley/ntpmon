@@ -159,8 +159,6 @@ data Server = Server {
       svrHostName     :: HostName
     , svrAddress      :: SockAddr
     , svrRawSamples   :: [Sample]
-    , svrRawSample0   :: Sample
-    , svrRawSampleN   :: Sample
     , svrMinRoundtrip :: ClockDiff
     } deriving (Show)
 
@@ -176,8 +174,7 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
 resolveServers :: HostName -> IO [Server]
 resolveServers host = map (mkServer . addrAddress) <$> getHostAddrInfo
   where
-    mkServer addr = Server host addr [] emptySample emptySample maxBound
-    emptySample   = (Sample 0 ntpOrigin ntpOrigin maxBound)
+    mkServer addr = Server host addr [] maxBound
 
     getHostAddrInfo = getAddrInfo hints (Just host) (Just "ntp")
 
@@ -213,13 +210,14 @@ updateServers svrs = do
     NTPData{..} <- get
     liftIO $ do
         pkts <- unfoldM (tryReadChan ntpIncoming)
-        trace (unwords $ map (show . fst) pkts) $ return (map (update ntpClock pkts) svrs)
+        trace (unwords $ map (show . fst) pkts) $
+            return (map (update pkts) svrs)
   where
-    update :: Clock -> [AddrSample] -> Server -> Server
-    update clock = fconcat . map go
+    update :: [AddrSample] -> Server -> Server
+    update = fconcat . map go
       where
         go (addr, s) svr
-          | addr == svrAddress svr = updateServer clock svr s
+          | addr == svrAddress svr = updateServer svr s
           | otherwise              = svr
 
     fconcat :: [a -> a] -> a -> a
@@ -230,28 +228,16 @@ updateServers svrs = do
         if empty then return Nothing
                  else Just <$> readTChan chan
 
-updateServer :: Clock -> Server -> Sample -> Server
-updateServer clock svr s = updateSampleN $ svr {
-    -- force the evaluation of the last sample in the list
-    -- to avoid building up lots of unevaluated thunks
-      svrRawSamples = let xs = take maxSamples (s : svrRawSamples svr)
-                      in last xs `seq` xs
-
-    -- the first sample should be saved as svrRawSample0
-    , svrRawSample0 = if null (svrRawSamples svr)
-                      then let x = fudgeFrequencyEstimate clock s 20 in traceShow x x
-                      else (svrRawSample0 svr)
-
-    -- see if we have a new winner for minimum round-trip time
-    , svrMinRoundtrip = let x = min (roundtrip s) (svrMinRoundtrip svr)
-                        in if x < svrMinRoundtrip svr
-                           then trace ("New Min: " ++ show (fromIntegral x / clockFrequency clock)) x
-                           else x
+updateServer :: Server -> Sample -> Server
+updateServer svr s = svr
+    { svrRawSamples = samples
+    , svrMinRoundtrip = (minimum . map roundtrip) samples
     }
   where
-    updateSampleN svr' =
-        svr' { svrRawSampleN = if withinError clock svr s
-                               then s else (svrRawSampleN svr) }
+    -- force the evaluation of the last sample in the list
+    -- to avoid building up lots of unevaluated thunks
+    samples = let xs = take maxSamples (s : svrRawSamples svr)
+              in last xs `seq` xs
 
 
 -- | Assumes the current frequency is the average of the last x seconds.
@@ -262,7 +248,7 @@ fudgeFrequencyEstimate clock s nsecs = s
 
 
 maxSamples :: Int
-maxSamples = 200 * samplesPerSecond
+maxSamples = 50 * samplesPerSecond
 
 samplesPerSecond :: Int
 samplesPerSecond = 1
@@ -348,7 +334,7 @@ quality clock svr s = exp (-x*x)
     x = sampleError / baseError
 
     sampleError = currentError clock svr s
-    baseError   = 4 * estimatedHostDelay
+    baseError   = 2 * estimatedHostDelay
 
 initialError :: Clock -> Server -> Sample -> Seconds
 initialError clock Server{..} s = fromDiff clock (roundtrip s - svrMinRoundtrip)
