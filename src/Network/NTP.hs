@@ -23,6 +23,7 @@ import qualified Data.Vector.Unboxed as V
 import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
+import qualified Statistics.Function as S
 import qualified Statistics.Sample as S
 
 import           Data.NTP hiding (Server)
@@ -30,6 +31,7 @@ import           System.Counter
 import           Text.PrefixSI
 
 import           Debug.Trace
+import           Text.Printf (printf)
 
 ------------------------------------------------------------------------
 -- NTP Monad
@@ -166,7 +168,7 @@ data Server = Server {
     , svrAddress      :: SockAddr
     , svrRawSamples   :: [Sample]
     , svrMinRoundtrip :: ClockDiff
-    , svrMeanError    :: ClockDiff
+    , svrBaseError    :: ClockDiff
     } deriving (Show)
 
 svrName :: Server -> String
@@ -217,7 +219,8 @@ updateServers svrs = do
     NTPData{..} <- get
     liftIO $ do
         pkts <- unfoldM (tryReadChan ntpIncoming)
-        trace (unwords $ map (show . fst) pkts) $
+        trace "" $
+        --trace (unwords $ map (show . fst) pkts) $
             return (map (update pkts) svrs)
   where
     update :: [AddrSample] -> Server -> Server
@@ -236,15 +239,22 @@ updateServers svrs = do
                  else Just <$> readTChan chan
 
 updateServer :: Server -> Sample -> Server
-updateServer svr s = svr
+updateServer svr s =
+    trace (printf "%-15s%8.0f%8.0f"
+           (svrHostName svr) minRoundtrip stdDevRoundtrip) $ svr
     { svrRawSamples   = samples
     , svrMinRoundtrip = round minRoundtrip
-    , svrMeanError    = round (meanRoundtrip - minRoundtrip)
+    , svrBaseError    = round (3 * stdDevRoundtrip)
     }
   where
-    roundtrips    = vector (fromIntegral . roundtrip) samples
-    minRoundtrip  = V.minimum roundtrips
-    meanRoundtrip = S.mean roundtrips
+    minRoundtrip    = V.head bestRoundtrips
+    stdDevRoundtrip = S.stdDev bestRoundtrips
+
+    -- Trim roundtrips so that outliers due to network congestion are
+    -- not included in our quality weights.
+    roundtrips     = vector (fromIntegral . roundtrip) samples
+    bestRoundtrips = (V.take half . S.partialSort half) roundtrips
+    half           = (V.length roundtrips + 1) `div` 2
 
     -- force the evaluation of the last sample in the list
     -- to avoid building up lots of unevaluated thunks
@@ -258,7 +268,7 @@ freqSamples :: Int
 freqSamples = round (1000 * samplesPerSecond)
 
 phaseSamples :: Int
-phaseSamples = round (60 * samplesPerSecond)
+phaseSamples = round (50 * samplesPerSecond)
 
 samplesPerSecond :: Double
 samplesPerSecond = 0.5
@@ -267,18 +277,24 @@ adjustClock :: Server -> Clock -> Maybe (Clock, Seconds)
 adjustClock svr@Server{..} clock =
     traceShow phase $
     traceShow freq $
-    if length svrRawSamples > 5
-    then Just (adjust clock, phase)
-    else Nothing
+    traceShow (V.take 5 weights) $
+    if nsamples < 5 || isNaN freq || isNaN phase
+    then Nothing
+    else Just (adjust clock, phase)
   where
     adjust = adjustOffset (realToFrac phase)
            . adjustFrequency freq
            . adjustOrigin earliestTime
 
+    nsamples       = length svrRawSamples
     earliestSample = last svrRawSamples
     earliestTime   = t1 earliestSample
 
-    phase     = S.meanWeighted (V.take phaseSamples weightedOffsets)
+    -- phase lock trades offset for jitter early on when
+    -- the frequency lock hasn't settled yet
+    phaseN = min phaseSamples ((nsamples + 4) `div` 5)
+    phase  = S.meanWeighted (V.take phaseN weightedOffsets)
+
     (_, freq) = linearRegression (V.take freqSamples times)
                                  (V.take freqSamples weightedOffsets)
 
@@ -312,7 +328,7 @@ quality clock svr s = exp (-x*x)
     x = sampleError / baseError
 
     sampleError = currentError clock svr s
-    baseError   = fromDiff clock (svrMeanError svr)
+    baseError   = fromDiff clock (svrBaseError svr)
 
 initialError :: Clock -> Server -> Sample -> Seconds
 initialError clock Server{..} s = fromDiff clock (roundtrip s - svrMinRoundtrip)
