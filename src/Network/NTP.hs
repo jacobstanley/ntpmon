@@ -150,6 +150,14 @@ adjustOrigin newIndex0 c = c
 setFrequency :: Double -> Clock -> Clock
 setFrequency freq c = c { clockFrequency = freq }
 
+-- | The difference between two absolute times.
+sub :: UTCTime -> UTCTime -> NominalDiffTime
+sub = diffUTCTime
+
+-- | Adds an offset to an absolute time.
+add :: UTCTime -> NominalDiffTime -> UTCTime
+add = flip addUTCTime
+
 ------------------------------------------------------------------------
 -- Server
 
@@ -158,6 +166,7 @@ data Server = Server {
     , svrAddress      :: SockAddr
     , svrRawSamples   :: [Sample]
     , svrMinRoundtrip :: ClockDiff
+    , svrMeanError    :: ClockDiff
     } deriving (Show)
 
 svrName :: Server -> String
@@ -172,7 +181,7 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
 resolveServers :: HostName -> IO [Server]
 resolveServers host = map (mkServer . addrAddress) <$> getHostAddrInfo
   where
-    mkServer addr = Server host addr [] maxBound
+    mkServer addr = Server host addr [] 0 0
 
     getHostAddrInfo = getAddrInfo hints (Just host) (Just "ntp")
 
@@ -198,10 +207,10 @@ receive sock getClock = handleIOErrors $ do
     handleIOErrors = handle (\(e :: IOException) -> return (Left (show e)))
 
     mkSample t4 Packet{..} = Sample
-        { rawT1 = fromTimestamp ntpT1
-        , rawT2 = fromTimestamp ntpT2
-        , rawT3 = fromTimestamp ntpT3
-        , rawT4 = t4 }
+        { t1 = fromTimestamp ntpT1
+        , t2 = fromTimestamp ntpT2
+        , t3 = fromTimestamp ntpT3
+        , t4 = t4 }
 
 updateServers :: [Server] -> NTP [Server]
 updateServers svrs = do
@@ -228,22 +237,19 @@ updateServers svrs = do
 
 updateServer :: Server -> Sample -> Server
 updateServer svr s = svr
-    { svrRawSamples = samples
-    , svrMinRoundtrip = (minimum . map roundtrip) samples
+    { svrRawSamples   = samples
+    , svrMinRoundtrip = round minRoundtrip
+    , svrMeanError    = round (meanRoundtrip - minRoundtrip)
     }
   where
+    roundtrips    = vector (fromIntegral . roundtrip) samples
+    minRoundtrip  = V.minimum roundtrips
+    meanRoundtrip = S.mean roundtrips
+
     -- force the evaluation of the last sample in the list
     -- to avoid building up lots of unevaluated thunks
     samples = let xs = take maxSamples (s : svrRawSamples svr)
               in last xs `seq` xs
-
-
--- | Assumes the current frequency is the average of the last x seconds.
-fudgeFrequencyEstimate :: Clock -> Sample -> Seconds -> Sample
-fudgeFrequencyEstimate clock s nsecs = s
-    { rawT1 = rawT1 s - round (nsecs * clockFrequency clock)
-    , rawT2 = rawT2 s `add` realToFrac (-nsecs) }
-
 
 maxSamples :: Int
 maxSamples = max phaseSamples freqSamples
@@ -270,19 +276,65 @@ adjustClock svr@Server{..} clock =
            . adjustOrigin earliestTime
 
     earliestSample = last svrRawSamples
-    earliestTime   = rawT1 earliestSample
+    earliestTime   = t1 earliestSample
 
     phase     = S.meanWeighted (V.take phaseSamples weightedOffsets)
     (_, freq) = linearRegression (V.take freqSamples times)
                                  (V.take freqSamples weightedOffsets)
 
     weightedOffsets = V.zip offsets weights
-    times   = doubleVector (fromDiff clock . (\x -> rawT4 x - earliestTime)) svrRawSamples
-    offsets = doubleVector (offset clock) svrRawSamples
-    weights = doubleVector (quality clock svr) svrRawSamples
+    times   = vector (fromDiff clock . (\x -> t4 x - earliestTime)) svrRawSamples
+    offsets = vector (offset clock) svrRawSamples
+    weights = vector (quality clock svr) svrRawSamples
 
-    doubleVector :: (a -> Double) -> [a] -> V.Vector Double
-    doubleVector f = V.fromList . map f
+------------------------------------------------------------------------
+-- Samples
+
+data Sample = Sample {
+      t1 :: ClockIndex
+    , t2 :: UTCTime
+    , t3 :: UTCTime
+    , t4 :: ClockIndex
+    } deriving (Show, Eq)
+
+offset :: Clock -> Sample -> Seconds
+offset clock Sample{..} = realToFrac (remote `sub` local)
+  where
+    local  = clockTime clock (t1 + (t4 - t1) `div` 2)
+    remote = t2 `add` ((t3 `sub` t2) / 2)
+
+roundtrip :: Sample -> ClockDiff
+roundtrip Sample{..} = t4 - t1
+
+quality :: Clock -> Server -> Sample -> Double
+quality clock svr s = exp (-x*x)
+  where
+    x = sampleError / baseError
+
+    sampleError = currentError clock svr s
+    baseError   = fromDiff clock (svrMeanError svr)
+
+initialError :: Clock -> Server -> Sample -> Seconds
+initialError clock Server{..} s = fromDiff clock (roundtrip s - svrMinRoundtrip)
+
+-- TODO could be more accurate if we calculated estimated frequency error
+currentError :: Clock -> Server -> Sample -> Seconds
+currentError clock svr s = initial + drift * age
+  where
+    initial = initialError clock svr s
+
+    age = fromDiff clock (currentTime - sampleTime)
+    currentTime = t4 (head (svrRawSamples svr))
+    sampleTime  = t4 s
+
+    drift = 1 / 10000000 -- 0.1 ppm
+
+------------------------------------------------------------------------
+-- Vector/Statistics Utils
+
+-- | Maps a functions over a list and turns it in to a vector.
+vector :: (a -> Double) -> [a] -> V.Vector Double
+vector f = V.fromList . map f
 
 -- | Simple linear regression between 2 samples.
 --   Takes two vectors Y={yi} and X={xi} and returns
@@ -301,56 +353,3 @@ linearRegression xs ys = (alpha, beta)
     !alpha = my - beta * mx
 {-# INLINE linearRegression #-}
 
-------------------------------------------------------------------------
--- Samples
-
-data Sample = Sample {
-      rawT1 :: ClockIndex
-    , rawT2 :: UTCTime
-    , rawT3 :: UTCTime
-    , rawT4 :: ClockIndex
-    } deriving (Show, Eq)
-
--- TODO Change to use uncorrected clock instead of the absolute clock
-offset :: Clock -> Sample -> Seconds
-offset clock Sample{..} = realToFrac (remote `sub` local)
-  where
-    local  = clockTime clock (rawT1 + (rawT4 - rawT1) `div` 2)
-    remote = rawT2 `add` ((rawT3 `sub` rawT2) / 2)
-
-roundtrip :: Sample -> ClockDiff
-roundtrip Sample{..} = rawT4 - rawT1
-
-quality :: Clock -> Server -> Sample -> Double
-quality clock svr s = exp (-x*x)
-  where
-    x = sampleError / baseError
-
-    sampleError = currentError clock svr s
-    baseError   = 4 * estimatedHostDelay
-
-initialError :: Clock -> Server -> Sample -> Seconds
-initialError clock Server{..} s = fromDiff clock (roundtrip s - svrMinRoundtrip)
-
--- TODO could be more accurate if we calculated estimated frequency error
-currentError :: Clock -> Server -> Sample -> Seconds
-currentError clock svr s = initial + drift * age
-  where
-    initial = initialError clock svr s
-
-    age = fromDiff clock (currentTime - sampleTime)
-    currentTime = rawT4 (head (svrRawSamples svr))
-    sampleTime  = rawT4 s
-
-    drift = 1 / 10000000 -- 0.1 ppm
-
-estimatedHostDelay :: Double
-estimatedHostDelay = 15 / 1000 / 1000 -- 15 usec
-
--- | The difference between two absolute times.
-sub :: UTCTime -> UTCTime -> NominalDiffTime
-sub = diffUTCTime
-
--- | Adds an offset to an absolute time.
-add :: UTCTime -> NominalDiffTime -> UTCTime
-add = flip addUTCTime
