@@ -346,12 +346,6 @@ currentError clock svr s = initial + drift * age
 
     drift = 1 / 10000000 -- 0.1 ppm
 
-withinError :: Clock -> Server -> Sample -> Bool
-withinError clock svr = (< allowedError) . go . initialError clock svr
-  where
-    allowedError = 20 * estimatedHostDelay
-    go x = trace ("Min: " ++ show (svrMinRoundtrip svr) ++ "  Error: " ++ show x ++ "s  (Allowed: " ++ show allowedError ++ "s)") x
-
 estimatedHostDelay :: Double
 estimatedHostDelay = 15 / 1000 / 1000 -- 15 usec
 
