@@ -16,8 +16,6 @@ import           Control.Monad.IO.Class
 import           Control.Monad.Loops (unfoldM)
 import           Control.Monad.STM (atomically)
 import           Control.Monad.State
-import           Data.List (sortBy)
-import           Data.Ord (comparing)
 import           Data.Serialize (encode, decode)
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, diffUTCTime)
 import qualified Data.Time.Clock as T
@@ -348,50 +346,6 @@ currentError clock svr s = initial + drift * age
 
 estimatedHostDelay :: Double
 estimatedHostDelay = 15 / 1000 / 1000 -- 15 usec
-
-
-data OldSample = OldSample {
-      t1 :: UTCTime
-    , t2 :: UTCTime
-    , t3 :: UTCTime
-    , t4 :: UTCTime
-    } deriving (Show, Eq)
-
-oldReify :: Clock -> Sample -> OldSample
-oldReify clock Sample{..} = OldSample{..}
-  where
-    t1 = clockTime clock rawT1
-    t2 = rawT2
-    t3 = rawT3
-    t4 = clockTime clock rawT4
-
-oldOffset :: OldSample -> NominalDiffTime
-oldOffset OldSample{..} = ((t2 `sub` t1) + (t3 `sub` t4)) / 2
-
-oldDelay :: OldSample -> NominalDiffTime
-oldDelay OldSample{..} =
-    -- If the server is very close to us, or even on the same computer,
-    -- and its clock is not very precise (e.g. Win 7 is ~1ms) then the
-    -- total roundtrip time can be less than the processing time. In
-    -- this case just ignore the processing time.
-    if roundtripTime < processingTime
-    then roundtripTime
-    else roundtripTime - processingTime
-  where
-    roundtripTime  = (t4 `sub` t1)
-    processingTime = (t3 `sub` t2)
-
--- | The NTP clock filter. Select the sample (from the last 8) with the
--- lowest delay.
-clockFilter :: [OldSample] -> Maybe OldSample
-clockFilter = go . take window
-  where
-    -- number of samples to consider in the sliding window
-    window = 8
-
-    go xs = if length xs == window
-            then (Just . head . sortBy (comparing oldDelay)) xs
-            else Nothing
 
 -- | The difference between two absolute times.
 sub :: UTCTime -> UTCTime -> NominalDiffTime
