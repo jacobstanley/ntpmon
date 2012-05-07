@@ -1,5 +1,5 @@
-name:                ntp-monitor
-version:             0.4
+name:                ntpmon
+version:             0.5
 synopsis:            Monitors NTP servers
 license:             BSD3
 license-file:        LICENSE
@@ -14,7 +14,7 @@ flag tsc
   default: False
   description: Force the use of RDTSC on Windows
 
-executable ntp-monitor
+executable ntpmon
   main-is: Main.hs
   hs-source-dirs: src
 
