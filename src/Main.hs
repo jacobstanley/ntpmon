@@ -1,3 +1,4 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -17,17 +18,26 @@ import Text.Printf (printf)
 
 import Network.NTP
 
+import Control.Monad (forever)
+import Network.Socket hiding (send, sendTo, recv, recvFrom)
+import Network.Socket.ByteString
+import Foreign.C
+import Foreign.Marshal
+import Foreign.Storable
+import Foreign.Ptr
+import qualified Data.ByteString.Char8 as B
+
 ------------------------------------------------------------------------
 
 main :: IO ()
 main = do
-    hosts <- getArgs
-    if length hosts < 1
-       then putStr usage
-       else do
-         withNTP (hPutStrLn stderr) $ do
-            (reference:servers) <- resolve hosts
-            monitor reference servers
+    args <- getArgs
+    case args of
+      []            -> putStr usage
+      ["--service"] -> runService
+      hosts         -> withNTP (hPutStrLn stderr) $ do
+        (reference:servers) <- resolve hosts
+        monitor reference servers
   where
     resolve hosts = liftIO (concat <$> mapM resolveServers hosts)
 
@@ -42,6 +52,73 @@ usage = "NTP Monitor 0.5\n\
 \\n\
 \\nNTP servers can be specified using either their hostname or IP address.\
 \\n"
+
+runService :: IO ()
+runService = withSocketsDo $ do
+    sock <- multicastReceiver "239.255.255.250" "1900"
+    forever $ do
+        (bs, addr) <- recvFrom sock 1024
+        putStr "Packet From: "
+        print addr
+        B.putStr bs
+
+multicastReceiver :: HostName -> ServiceName -> IO Socket
+multicastReceiver host port = do
+    (addr:_) <- getAddrInfo hints Nothing (Just port)
+
+    print addr
+
+    sock <- socket (addrFamily addr)
+                   (addrSocketType addr)
+                   (addrProtocol addr)
+
+    setSocketOption sock ReuseAddr 1
+
+    bindSocket sock (addrAddress addr)
+    addMembership sock host "127.0.0.1"
+    addMembership sock host "172.23.21.115"
+
+    return sock
+  where
+    hints = Just defaultHints
+          { addrFlags      = [AI_PASSIVE, AI_ADDRCONFIG]
+          , addrFamily     = AF_INET
+          , addrSocketType = Datagram }
+
+-- | Make the socket listen on multicast datagrams sent by the specified 'HostName'.
+addMembership :: Socket -> HostName -> HostName -> IO ()
+addMembership s mcast local = maybeIOError "addMembership" (doMulticastGroup _IP_ADD_MEMBERSHIP s mcast local)
+
+maybeIOError :: String -> IO CInt -> IO ()
+maybeIOError name f = f >>= \err -> case err of
+    0 -> return ()
+    _ -> ioError (errnoToIOError name (Errno (fromIntegral err)) Nothing Nothing)
+
+doMulticastGroup :: CInt -> Socket -> HostName -> HostName -> IO CInt
+doMulticastGroup flag (MkSocket s _ _ _ _) mcast local = allocaBytes (8) $ \mReqPtr -> do
+    mcastAddr <- inet_addr mcast
+    localAddr <- inet_addr local
+    (\hsc_ptr -> pokeByteOff hsc_ptr 0) mReqPtr mcastAddr
+    (\hsc_ptr -> pokeByteOff hsc_ptr 4) mReqPtr localAddr
+    c_setsockopt s _IPPROTO_IP flag (castPtr mReqPtr) ((8))
+
+foreign import stdcall unsafe "setsockopt"
+    c_setsockopt :: CInt -> CInt -> CInt -> Ptr CInt -> CInt -> IO CInt
+
+foreign import stdcall unsafe "WSAGetLastError"
+    wsaGetLastError :: IO CInt
+
+getLastError :: CInt -> IO CInt
+getLastError = const wsaGetLastError
+
+_IP_MULTICAST_IF, _IP_MULTICAST_TTL, _IP_MULTICAST_LOOP, _IP_ADD_MEMBERSHIP, _IP_DROP_MEMBERSHIP :: CInt
+_IP_MULTICAST_IF    = 9
+_IP_MULTICAST_TTL   = 10
+_IP_MULTICAST_LOOP  = 11
+_IP_ADD_MEMBERSHIP  = 12
+_IP_DROP_MEMBERSHIP = 13
+_IPPROTO_IP :: CInt
+_IPPROTO_IP = 0
 
 monitor :: Server -> [Server] -> NTP ()
 monitor ref ss = do
