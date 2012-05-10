@@ -19,6 +19,7 @@ import Text.Printf (printf)
 import Network.NTP
 
 import Control.Monad (forever)
+import Control.Concurrent (forkIO)
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
 import Foreign.C
@@ -34,7 +35,9 @@ main = do
     args <- getArgs
     case args of
       []            -> putStr usage
-      ["--service"] -> runService
+      ["--service"] -> do
+        forkIO runService
+        forever (threadDelay 10000000)
       hosts         -> withNTP (hPutStrLn stderr) $ do
         (reference:servers) <- resolve hosts
         monitor reference servers
