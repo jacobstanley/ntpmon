@@ -37,7 +37,7 @@ executable ntpmon
     build-depends: Win32 == 2.2.*
     cpp-options: -DQPC
   else
-    build-depends: rdtsc-bsd == 0.1.*
+    build-depends: rdtsc == 1.3.*
 
   ghc-prof-options:
     -fprof-auto
