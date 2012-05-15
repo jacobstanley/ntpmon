@@ -1,4 +1,6 @@
+{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -28,6 +30,14 @@ import Foreign.Storable
 import Foreign.Ptr
 import qualified Data.ByteString.Char8 as B
 
+import Control.Concurrent.MVar
+import Control.Exception (throw, Exception, fromException)
+import Data.Typeable (Typeable)
+import Network.HTTP.Types
+import Network.Wai
+import Network.Wai.Handler.Warp
+import qualified Data.ByteString.Lazy.Char8 as L
+
 ------------------------------------------------------------------------
 
 main :: IO ()
@@ -56,14 +66,83 @@ usage = "NTP Monitor 0.5\n\
 \\nNTP servers can be specified using either their hostname or IP address.\
 \\n"
 
+------------------------------------------------------------------------
+-- Running as a service
+
+--runService :: IO ()
+--runService = withSocketsDo $ do
+--    sock <- multicastReceiver "239.255.255.250" "1900"
+--    forever $ do
+--        (bs, addr) <- recvFrom sock 1024
+--        sendAllTo sock bs addr
+--
+--        putStrLn (replicate 72 '-')
+--        putStrLn ("Replied to " ++ show addr)
+--        putStrLn (replicate 72 '-')
+--        B.putStrLn bs
+
 runService :: IO ()
 runService = withSocketsDo $ do
     sock <- multicastReceiver "239.255.255.250" "1900"
-    forever $ do
-        (bs, addr) <- recvFrom sock 1024
-        putStr "Packet From: "
-        print addr
-        B.putStr bs
+    runSettingsUdp settings sock ssdp
+  where
+    settings = defaultSettings
+        { settingsPort = 1900
+        , settingsOnException = \e ->
+            case fromException e of
+                Just IgnoreRequest -> return ()
+                Nothing -> settingsOnException defaultSettings e
+        }
+
+ssdp :: Application
+ssdp req = do
+    liftIO $ putStrLn $ maybe "(null)" B.unpack serviceType ++ " -> " ++ (show $ remoteHost req)
+    case (method, path, serviceType) of
+        ("M-SEARCH", "*", Just "ssdp:all") -> ok
+        ("M-SEARCH", "*", Just "ntpmon")   -> ok
+        _                                  -> ignore
+  where
+    method      = requestMethod req
+    path        = rawPathInfo req
+    serviceType = lookup "ST" (requestHeaders req)
+
+    ok = return $ responseLBS status200
+       [ ("ST", "ntpmon")
+       , ("USN", "uuid:abcdefgh-7dec-11d0-a765-00a0c91e6bf6")
+       , ("Location", "http://1.1.1.5:45678")
+       , ("Cache-Control", "max-age=1800")
+       , ("Server", "Windows/7 UPnP/1.1 ntpmon/0.5")
+       , ("Content-Length", "0")
+       ] L.empty
+
+    ignore = throw IgnoreRequest
+
+data IgnoreRequest = IgnoreRequest
+    deriving (Show, Typeable, Eq)
+instance Exception IgnoreRequest
+
+------------------------------------------------------------------------
+-- Warp UDP Support
+
+runSettingsUdp :: Settings -> Socket -> Application -> IO ()
+runSettingsUdp set sock = runSettingsConnection set (getUdpConnection sock)
+
+getUdpConnection :: Socket -> IO (Connection, SockAddr)
+getUdpConnection sock = do
+    (bs, addr) <- recvFrom sock (64 * 1024)
+    req <- newMVar bs
+    return (conn addr req, addr)
+  where
+    conn addr req = Connection
+         { connSendMany = \xs -> sendManyTo sock xs addr
+         , connSendAll  = \x  -> sendAllTo  sock x  addr
+         , connSendFile = error "connSendFile: sendfile is not allowed with UDP connections"
+         , connClose    = return ()
+         , connRecv     = swapMVar req B.empty
+         }
+
+------------------------------------------------------------------------
+-- Multicast Support
 
 multicastReceiver :: HostName -> ServiceName -> IO Socket
 multicastReceiver host port = do

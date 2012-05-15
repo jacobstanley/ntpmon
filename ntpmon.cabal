@@ -22,6 +22,7 @@ executable ntpmon
       base              == 4.*
     , bytestring        == 0.9.*
     , cereal            == 0.3.*
+    , http-types        == 0.6.*
     , monad-loops       == 0.3.*
     , mtl               == 2.0.*
     , network           == 2.3.*
@@ -32,6 +33,9 @@ executable ntpmon
     , time              == 1.4.*
     , transformers      == 0.2.*
     , vector            == 0.9.*
+    , wai               == 1.2.*
+    , wai-extra         == 1.2.*
+    , warp              == 1.2.*
 
   if os(windows) && !flag(tsc)
     build-depends: Win32 == 2.2.*
