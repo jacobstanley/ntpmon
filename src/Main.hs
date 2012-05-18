@@ -34,6 +34,7 @@ import Control.Concurrent.MVar
 import Control.Exception (throw, Exception, fromException)
 import Data.Typeable (Typeable)
 import Network.HTTP.Types
+import Network.Info
 import Network.Wai
 import Network.Wai.Handler.Warp
 import qualified Data.ByteString.Lazy.Char8 as L
@@ -83,8 +84,11 @@ usage = "NTP Monitor 0.5\n\
 
 runService :: IO ()
 runService = withSocketsDo $ do
-    sock <- multicastReceiver "239.255.255.250" "1900"
-    runSettingsUdp settings sock ssdp
+    addrs <- getIPv4Addrs
+
+    let app = ssdp "ntpmon" "http://0.0.0.0:45678"
+    sock <- multicastReceiver addrs "239.255.255.250" "1900"
+    runSettingsUdp settings sock app
   where
     settings = defaultSettings
         { settingsPort = 1900
@@ -94,24 +98,26 @@ runService = withSocketsDo $ do
                 Nothing -> settingsOnException defaultSettings e
         }
 
-ssdp :: Application
-ssdp req = do
-    liftIO $ putStrLn $ maybe "(null)" B.unpack serviceType ++ " -> " ++ (show $ remoteHost req)
-    case (method, path, serviceType) of
-        ("M-SEARCH", "*", Just "ssdp:all") -> ok
-        ("M-SEARCH", "*", Just "ntpmon")   -> ok
-        _                                  -> ignore
+getIPv4Addrs :: IO [HostName]
+getIPv4Addrs = map (show . ipv4) <$> getNetworkInterfaces
+
+ssdp :: Ascii -> Ascii -> Application
+ssdp serviceType location req = do
+    liftIO $ putStrLn $ B.unpack method ++ " " ++ B.unpack st ++ " -> " ++ (show $ remoteHost req)
+    case (method, path) of
+        ("M-SEARCH", "*") | st == "ssdp:all"  -> ok
+                          | st == serviceType -> ok
+        _                                     -> ignore
   where
-    method      = requestMethod req
-    path        = rawPathInfo req
-    serviceType = lookup "ST" (requestHeaders req)
+    method = requestMethod req
+    path   = rawPathInfo req
+    st     = maybe B.empty id (lookup "ST" (requestHeaders req))
 
     ok = return $ responseLBS status200
-       [ ("ST", "ntpmon")
-       , ("USN", "uuid:abcdefgh-7dec-11d0-a765-00a0c91e6bf6")
-       , ("Location", "http://1.1.1.5:45678")
-       , ("Cache-Control", "max-age=1800")
-       , ("Server", "Windows/7 UPnP/1.1 ntpmon/0.5")
+       [ ("Cache-Control", "max-age=1800")
+       , ("ST", serviceType)
+       , ("Location", location)
+       , ("Server", serviceType `B.append` "/0.5")
        , ("Content-Length", "0")
        ] L.empty
 
@@ -144,11 +150,9 @@ getUdpConnection sock = do
 ------------------------------------------------------------------------
 -- Multicast Support
 
-multicastReceiver :: HostName -> ServiceName -> IO Socket
-multicastReceiver host port = do
+multicastReceiver :: [HostName] -> HostName -> ServiceName -> IO Socket
+multicastReceiver localAddrs mcastAddr port = do
     (addr:_) <- getAddrInfo hints Nothing (Just port)
-
-    print addr
 
     sock <- socket (addrFamily addr)
                    (addrSocketType addr)
@@ -157,8 +161,7 @@ multicastReceiver host port = do
     setSocketOption sock ReuseAddr 1
 
     bindSocket sock (addrAddress addr)
-    addMembership sock host "127.0.0.1"
-    addMembership sock host "172.23.21.115"
+    mapM_ (addMembership sock mcastAddr) localAddrs
 
     return sock
   where
@@ -187,11 +190,11 @@ doMulticastGroup flag (MkSocket s _ _ _ _) mcast local = allocaBytes (8) $ \mReq
 foreign import stdcall unsafe "setsockopt"
     c_setsockopt :: CInt -> CInt -> CInt -> Ptr CInt -> CInt -> IO CInt
 
-foreign import stdcall unsafe "WSAGetLastError"
-    wsaGetLastError :: IO CInt
-
-getLastError :: CInt -> IO CInt
-getLastError = const wsaGetLastError
+-- foreign import stdcall unsafe "WSAGetLastError"
+--     wsaGetLastError :: IO CInt
+-- 
+-- getLastError :: CInt -> IO CInt
+-- getLastError = const wsaGetLastError
 
 _IP_MULTICAST_IF, _IP_MULTICAST_TTL, _IP_MULTICAST_LOOP, _IP_ADD_MEMBERSHIP, _IP_DROP_MEMBERSHIP :: CInt
 _IP_MULTICAST_IF    = 9
@@ -201,6 +204,8 @@ _IP_ADD_MEMBERSHIP  = 12
 _IP_DROP_MEMBERSHIP = 13
 _IPPROTO_IP :: CInt
 _IPPROTO_IP = 0
+
+------------------------------------------------------------------------
 
 monitor :: Server -> [Server] -> NTP ()
 monitor ref ss = do
