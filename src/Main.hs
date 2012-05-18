@@ -19,41 +19,29 @@ import System.Locale (defaultTimeLocale)
 import Text.Printf (printf)
 
 import Network.NTP
+import Win32Compat (getNTPConf)
 
-import Control.Monad (forever)
 import Control.Concurrent (forkIO)
-import Network.Socket hiding (send, sendTo, recv, recvFrom)
-import Network.Socket.ByteString
-import Foreign.C
-import Foreign.Marshal
-import Foreign.Storable
-import Foreign.Ptr
 import qualified Data.ByteString.Char8 as B
 
-import Control.Concurrent.MVar
-import Control.Exception (throw, Exception, fromException)
-import Data.Typeable (Typeable)
+import Network (HostName, withSocketsDo)
 import Network.HTTP.Types
-import Network.Info
 import Network.Wai
+import Network.Wai.Parse
 import Network.Wai.Handler.Warp
-import qualified Data.ByteString.Lazy.Char8 as L
+import Blaze.ByteString.Builder.ByteString
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
 
 ------------------------------------------------------------------------
 
 main :: IO ()
-main = do
+main = withSocketsDo $ do
     args <- getArgs
     case args of
       []            -> putStr usage
-      ["--service"] -> do
-        forkIO runService
-        forever (threadDelay 10000000)
-      hosts         -> withNTP (hPutStrLn stderr) $ do
-        (reference:servers) <- resolve hosts
-        monitor reference servers
-  where
-    resolve hosts = liftIO (concat <$> mapM resolveServers hosts)
+      ["--service"] -> runService
+      hosts         -> runMonitor hosts
 
 usage :: String
 usage = "NTP Monitor 0.5\n\
@@ -70,142 +58,43 @@ usage = "NTP Monitor 0.5\n\
 ------------------------------------------------------------------------
 -- Running as a service
 
---runService :: IO ()
---runService = withSocketsDo $ do
---    sock <- multicastReceiver "239.255.255.250" "1900"
---    forever $ do
---        (bs, addr) <- recvFrom sock 1024
---        sendAllTo sock bs addr
---
---        putStrLn (replicate 72 '-')
---        putStrLn ("Replied to " ++ show addr)
---        putStrLn (replicate 72 '-')
---        B.putStrLn bs
-
 runService :: IO ()
-runService = withSocketsDo $ do
-    addrs <- getIPv4Addrs
+runService = do
+    hosts <- (++ ["localhost"]) <$> readServers
+    forkIO (runMonitor hosts)
+    run 30030 app
 
-    let app = ssdp "ntpmon" "http://0.0.0.0:45678"
-    sock <- multicastReceiver addrs "239.255.255.250" "1900"
-    runSettingsUdp settings sock app
+readServers :: IO [HostName]
+readServers = servers <$> readNTPConf
   where
-    settings = defaultSettings
-        { settingsPort = 1900
-        , settingsOnException = \e ->
-            case fromException e of
-                Just IgnoreRequest -> return ()
-                Nothing -> settingsOnException defaultSettings e
-        }
+    readNTPConf = do
+        path <- getNTPConf
+        T.readFile path
 
-getIPv4Addrs :: IO [HostName]
-getIPv4Addrs = map (show . ipv4) <$> getNetworkInterfaces
+    servers = map (T.unpack . head)
+            . filter (not . null)
+            . filter (notElem "noselect")
+            . map (drop 1 . T.words)
+            . filter ("server" `T.isPrefixOf`)
+            . T.lines
 
-ssdp :: Ascii -> Ascii -> Application
-ssdp serviceType location req = do
-    liftIO $ putStrLn $ B.unpack method ++ " " ++ B.unpack st ++ " -> " ++ (show $ remoteHost req)
-    case (method, path) of
-        ("M-SEARCH", "*") | st == "ssdp:all"  -> ok
-                          | st == serviceType -> ok
-        _                                     -> ignore
-  where
-    method = requestMethod req
-    path   = rawPathInfo req
-    st     = maybe B.empty id (lookup "ST" (requestHeaders req))
-
-    ok = return $ responseLBS status200
-       [ ("Cache-Control", "max-age=1800")
-       , ("ST", serviceType)
-       , ("Location", location)
-       , ("Server", serviceType `B.append` "/0.5")
-       , ("Content-Length", "0")
-       ] L.empty
-
-    ignore = throw IgnoreRequest
-
-data IgnoreRequest = IgnoreRequest
-    deriving (Show, Typeable, Eq)
-instance Exception IgnoreRequest
+app :: Application
+app req = do
+  (params, _) <- parseRequestBody lbsBackEnd req
+  let r = B.concat $ map (\(x,y) -> B.concat [x,y]) params
+  return $ ResponseBuilder
+      status200
+      [("Content-Type", "text/plain")]
+      $ copyByteString r
 
 ------------------------------------------------------------------------
--- Warp UDP Support
 
-runSettingsUdp :: Settings -> Socket -> Application -> IO ()
-runSettingsUdp set sock = runSettingsConnection set (getUdpConnection sock)
-
-getUdpConnection :: Socket -> IO (Connection, SockAddr)
-getUdpConnection sock = do
-    (bs, addr) <- recvFrom sock (64 * 1024)
-    req <- newMVar bs
-    return (conn addr req, addr)
+runMonitor :: [HostName] -> IO ()
+runMonitor hosts = withNTP (hPutStrLn stderr) $ do
+    (reference:servers) <- resolve hosts
+    monitor reference servers
   where
-    conn addr req = Connection
-         { connSendMany = \xs -> sendManyTo sock xs addr
-         , connSendAll  = \x  -> sendAllTo  sock x  addr
-         , connSendFile = error "connSendFile: sendfile is not allowed with UDP connections"
-         , connClose    = return ()
-         , connRecv     = swapMVar req B.empty
-         }
-
-------------------------------------------------------------------------
--- Multicast Support
-
-multicastReceiver :: [HostName] -> HostName -> ServiceName -> IO Socket
-multicastReceiver localAddrs mcastAddr port = do
-    (addr:_) <- getAddrInfo hints Nothing (Just port)
-
-    sock <- socket (addrFamily addr)
-                   (addrSocketType addr)
-                   (addrProtocol addr)
-
-    setSocketOption sock ReuseAddr 1
-
-    bindSocket sock (addrAddress addr)
-    mapM_ (addMembership sock mcastAddr) localAddrs
-
-    return sock
-  where
-    hints = Just defaultHints
-          { addrFlags      = [AI_PASSIVE, AI_ADDRCONFIG]
-          , addrFamily     = AF_INET
-          , addrSocketType = Datagram }
-
--- | Make the socket listen on multicast datagrams sent by the specified 'HostName'.
-addMembership :: Socket -> HostName -> HostName -> IO ()
-addMembership s mcast local = maybeIOError "addMembership" (doMulticastGroup _IP_ADD_MEMBERSHIP s mcast local)
-
-maybeIOError :: String -> IO CInt -> IO ()
-maybeIOError name f = f >>= \err -> case err of
-    0 -> return ()
-    _ -> ioError (errnoToIOError name (Errno (fromIntegral err)) Nothing Nothing)
-
-doMulticastGroup :: CInt -> Socket -> HostName -> HostName -> IO CInt
-doMulticastGroup flag (MkSocket s _ _ _ _) mcast local = allocaBytes (8) $ \mReqPtr -> do
-    mcastAddr <- inet_addr mcast
-    localAddr <- inet_addr local
-    (\hsc_ptr -> pokeByteOff hsc_ptr 0) mReqPtr mcastAddr
-    (\hsc_ptr -> pokeByteOff hsc_ptr 4) mReqPtr localAddr
-    c_setsockopt s _IPPROTO_IP flag (castPtr mReqPtr) ((8))
-
-foreign import stdcall unsafe "setsockopt"
-    c_setsockopt :: CInt -> CInt -> CInt -> Ptr CInt -> CInt -> IO CInt
-
--- foreign import stdcall unsafe "WSAGetLastError"
---     wsaGetLastError :: IO CInt
--- 
--- getLastError :: CInt -> IO CInt
--- getLastError = const wsaGetLastError
-
-_IP_MULTICAST_IF, _IP_MULTICAST_TTL, _IP_MULTICAST_LOOP, _IP_ADD_MEMBERSHIP, _IP_DROP_MEMBERSHIP :: CInt
-_IP_MULTICAST_IF    = 9
-_IP_MULTICAST_TTL   = 10
-_IP_MULTICAST_LOOP  = 11
-_IP_ADD_MEMBERSHIP  = 12
-_IP_DROP_MEMBERSHIP = 13
-_IPPROTO_IP :: CInt
-_IPPROTO_IP = 0
-
-------------------------------------------------------------------------
+    resolve xs = liftIO (concat <$> mapM resolveServers xs)
 
 monitor :: Server -> [Server] -> NTP ()
 monitor ref ss = do

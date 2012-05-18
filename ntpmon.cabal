@@ -20,17 +20,19 @@ executable ntpmon
 
   build-depends:
       base              == 4.*
+    , blaze-builder     == 0.3.*
     , bytestring        == 0.9.*
     , cereal            == 0.3.*
+    , filepath          == 1.3.*
     , http-types        == 0.6.*
     , monad-loops       == 0.3.*
     , mtl               == 2.0.*
     , network           == 2.3.*
-    , network-info      == 0.2.*
     , old-locale        == 1.0.*
     , statistics        == 0.10.*
     , statistics-linreg == 0.2.*
     , stm               == 2.3.*
+    , text              == 0.11.*
     , time              == 1.4.*
     , transformers      == 0.2.*
     , vector            == 0.9.*

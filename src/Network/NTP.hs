@@ -30,8 +30,8 @@ import           Data.NTP hiding (Server)
 import           System.Counter
 import           Text.PrefixSI
 
-import           Debug.Trace
-import           Text.Printf (printf)
+--import           Debug.Trace
+--import           Text.Printf (printf)
 
 ------------------------------------------------------------------------
 -- NTP Monad
@@ -219,9 +219,9 @@ updateServers svrs = do
     NTPData{..} <- get
     liftIO $ do
         pkts <- unfoldM (tryReadChan ntpIncoming)
-        trace "" $
+        --trace "" $
         --trace (unwords $ map (show . fst) pkts) $
-            return (map (update pkts) svrs)
+        return (map (update pkts) svrs)
   where
     update :: [AddrSample] -> Server -> Server
     update = fconcat . map go
@@ -240,8 +240,8 @@ updateServers svrs = do
 
 updateServer :: Server -> Sample -> Server
 updateServer svr s =
-    trace (printf "%-15s%8.0f%8.0f"
-           (svrHostName svr) minRoundtrip stdDevRoundtrip) $ svr
+    --trace (printf "%-15s%8.0f%8.0f" (svrHostName svr) minRoundtrip stdDevRoundtrip) $
+    svr
     { svrRawSamples   = samples
     , svrMinRoundtrip = round minRoundtrip
     , svrBaseError    = round (3 * stdDevRoundtrip)
@@ -275,9 +275,9 @@ samplesPerSecond = 0.5
 
 adjustClock :: Server -> Clock -> Maybe (Clock, Seconds)
 adjustClock svr@Server{..} clock =
-    traceShow phase $
-    traceShow freq $
-    traceShow (V.take 5 weights) $
+    -- traceShow phase $
+    -- traceShow freq $
+    -- traceShow (V.take 5 weights) $
     if nsamples < 5 || isNaN freq || isNaN phase
     then Nothing
     else Just (adjust clock, phase)
