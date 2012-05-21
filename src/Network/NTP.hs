@@ -314,10 +314,13 @@ data Sample = Sample {
     } deriving (Show, Eq)
 
 offset :: Clock -> Sample -> Seconds
-offset clock Sample{..} = realToFrac (remote `sub` local)
-  where
-    local  = clockTime clock (t1 + (t4 - t1) `div` 2)
-    remote = t2 `add` ((t3 `sub` t2) / 2)
+offset clock sample = realToFrac (remoteTime sample `sub` localTime clock sample)
+
+localTime :: Clock -> Sample -> UTCTime
+localTime clock Sample{..} = clockTime clock (t1 + (t4 - t1) `div` 2)
+
+remoteTime :: Sample -> UTCTime
+remoteTime Sample{..} = t2 `add` ((t3 `sub` t2) / 2)
 
 roundtrip :: Sample -> ClockDiff
 roundtrip Sample{..} = t4 - t1

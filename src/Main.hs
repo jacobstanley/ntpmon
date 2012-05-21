@@ -1,8 +1,11 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
 module Main (main) where
 
@@ -11,6 +14,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put)
 import Data.List (intercalate)
+import Data.Time.Clock (UTCTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format
 import System.Environment (getArgs)
@@ -21,13 +25,18 @@ import Text.Printf (printf)
 import Network.NTP
 import Win32Compat (getNTPConf)
 
+import Data.IORef
 import Control.Concurrent (forkIO)
-import qualified Data.ByteString.Char8 as B
+
+import Data.Aeson
+
+import Data.Data (Data, Typeable)
+import Network.Socket (SockAddr(..), PortNumber(..))
 
 import Network (HostName, withSocketsDo)
 import Network.HTTP.Types
 import Network.Wai
-import Network.Wai.Parse
+import Network.Wai.Application.Static
 import Network.Wai.Handler.Warp
 import Blaze.ByteString.Builder.ByteString
 import qualified Data.Text as T
@@ -56,16 +65,35 @@ usage = "NTP Monitor 0.5\n\
 \\n"
 
 ------------------------------------------------------------------------
+-- State
+
+data ServiceState = ServiceState {
+      svcClock   :: Maybe Clock
+    , svcServers :: [Server]
+    }
+
+deriving instance Typeable Server
+deriving instance Typeable Sample
+deriving instance Data SockAddr
+deriving instance Data PortNumber
+deriving instance Data Sample
+deriving instance Data Server
+
+emptyServiceState :: ServiceState
+emptyServiceState = ServiceState Nothing []
+
+------------------------------------------------------------------------
 -- Running as a service
 
 runService :: IO ()
 runService = do
-    hosts <- (++ ["localhost"]) <$> readServers
-    forkIO (runMonitor hosts)
-    run 30030 app
+    hosts <- (++ ["localhost"]) <$> readNTPConfServers
+    ioref <- newIORef emptyServiceState
+    forkIO (runMonitor' hosts ioref)
+    run 30030 (app ioref)
 
-readServers :: IO [HostName]
-readServers = servers <$> readNTPConf
+readNTPConfServers :: IO [HostName]
+readNTPConfServers = servers <$> readNTPConf
   where
     readNTPConf = do
         path <- getNTPConf
@@ -78,32 +106,61 @@ readServers = servers <$> readNTPConf
             . filter ("server" `T.isPrefixOf`)
             . T.lines
 
-app :: Application
-app req = do
-  (params, _) <- parseRequestBody lbsBackEnd req
-  let r = B.concat $ map (\(x,y) -> B.concat [x,y]) params
-  return $ ResponseBuilder
-      status200
-      [("Content-Type", "text/plain")]
-      $ copyByteString r
+app :: IORef ServiceState -> Application
+app ioref req = case (requestMethod req, pathInfo req) of
+    ("GET", []) -> index
+    _           -> static
+  where
+    static = staticApp defaultWebAppSettings req
+
+    index = do
+        state <- liftIO (readIORef ioref)
+        return $ ResponseBuilder
+            status200
+            [("Content-Type", "application/json")
+            ,("Server", "ntpmon/0.5")]
+            $ copyLazyByteString (encode (allServerData state))
+
+data ServerData = ServerData String [(UTCTime, Double)]
+
+instance ToJSON ServerData where
+    toJSON (ServerData name xs) = object [
+          "name"    .= name
+        , "times"   .= toJSON (map fst xs)
+        , "offsets" .= toJSON (map snd xs)
+        ]
+
+allServerData :: ServiceState -> [ServerData]
+allServerData (ServiceState Nothing _)            = []
+allServerData (ServiceState (Just clock) servers) = map (serverData clock) servers
+
+serverData :: Clock -> Server -> ServerData
+serverData clock svr = ServerData (svrName svr) (zip times offsets)
+  where
+    samples = svrRawSamples svr
+    times   = map (localTime clock) samples
+    offsets = map (offset clock) samples
 
 ------------------------------------------------------------------------
 
 runMonitor :: [HostName] -> IO ()
-runMonitor hosts = withNTP (hPutStrLn stderr) $ do
+runMonitor hosts = newIORef emptyServiceState >>= runMonitor' hosts
+
+runMonitor' :: [HostName] -> IORef ServiceState -> IO ()
+runMonitor' hosts ioref = withNTP (hPutStrLn stderr) $ do
     (reference:servers) <- resolve hosts
-    monitor reference servers
+    monitor ioref reference servers
   where
     resolve xs = liftIO (concat <$> mapM resolveServers xs)
 
-monitor :: Server -> [Server] -> NTP ()
-monitor ref ss = do
+monitor :: IORef ServiceState -> Server -> [Server] -> NTP ()
+monitor ioref ref ss = do
     liftIO $ do
         hSetBuffering stdout LineBuffering
         (putStrLn . intercalate "," . map fst) headers
         (putStrLn . intercalate "," . map snd) headers
 
-    monitorLoop ref ss
+    monitorLoop ioref ref ss
   where
     servers = ref:ss
     refName = svrHostName ref
@@ -120,8 +177,8 @@ monitor ref ss = do
     header unit mkname s = (mkname (svrHostName s), unit)
 
 
-monitorLoop :: Server -> [Server] -> NTP ()
-monitorLoop ref ss = do
+monitorLoop :: IORef ServiceState -> Server -> [Server] -> NTP ()
+monitorLoop ioref ref ss = do
     -- send requests to servers
     mapM transmit (ref:ss)
 
@@ -129,19 +186,26 @@ monitorLoop ref ss = do
     liftIO $ threadDelay $ round (1000000 / samplesPerSecond)
 
     -- update any servers which received replies
-    (ref':ss') <- updateServers (ref:ss)
+    servers@(ref':ss') <- updateServers (ref:ss)
 
     -- sync clock with reference server
     mclock <- syncClockWith ref'
 
+    -- update state for web service
+    liftIO $ writeIORef ioref ServiceState {
+               svcClock   = fmap fst mclock
+             , svcServers = servers
+             }
+
     -- check if we're synchronized
     liftIO $ case mclock of
         Nothing -> return ()
-        Just (clock, off) -> do
+        Just (_clock, _off) -> do
             -- we are, so write samples to csv
-            writeSamples clock (ref':ss') off
+            --_writeSamples clock (ref':ss') off
+            return ()
 
-    monitorLoop ref' ss'
+    monitorLoop ioref ref' ss'
 
 syncClockWith :: Server -> NTP (Maybe (Clock, Seconds))
 syncClockWith server = do
@@ -152,8 +216,8 @@ syncClockWith server = do
         Just (clock, _) -> put ntp { ntpClock = clock }
     return mclock
 
-writeSamples :: Clock -> [Server] -> Seconds -> IO ()
-writeSamples clock servers off = do
+_writeSamples :: Clock -> [Server] -> Seconds -> IO ()
+_writeSamples clock servers off = do
     utc <- getCurrentTime clock
 
     let utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc
