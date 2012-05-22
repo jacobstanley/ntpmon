@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Smoothie Chart Example</title>
+    <script type="text/javascript" src="smoothie.js"></script>
+    <script type="text/javascript" src="jquery-1.7.2.min.js"></script>
+  </head>
+  <body>
+    <canvas id="mycanvas" width="500" height="200"></canvas>
+    <script type="text/javascript">
+      readISO8601 = function(str) {
+        var regex = /(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:[.,](\d+))?Z/i;
+        fn = $.trim(str).replace(regex, "new Date(Date.UTC(parseInt('$1',10),parseInt('$2',10)-1,parseInt('$3',10),parseInt('$4',10),parseInt('$5',10),parseInt('$6',10),(function(s){return parseInt(s,10)||0;})('$7')))");
+        return (new Function("return " + fn))();
+      };
+
+      TimeSeries.prototype.replaceAll = function(times, offsets) {
+        var data = [];
+        var maxOffset = Number.NaN;
+        for (var i = times.length - 1; i >= 0; i--) {
+          var time = readISO8601(times[i]).getTime();
+          var offset = offsets[i] * 1000;
+          data.push([time, offset]);
+          maxOffset = !isNaN(maxOffset) ? Math.max(maxOffset, Math.abs(offset)) : offset;
+        }
+        this.data = data;
+      };
+
+      var smoothie = new SmoothieChart({
+        millisPerPixel: 250,
+        maxValue: 1.5,
+        minValue: -1.5,
+        //fps: 4,
+        //scaleSmoothing: 1,
+        grid: { strokeStyle: 'rgb(125, 125, 125)'
+              , fillStyle: 'rgb(60, 60, 60)'
+              , lineWidth: 1
+              , millisPerLine: 10000
+              , verticalSections: 6 }
+      });
+
+      var line1 = new TimeSeries();
+      var line2 = new TimeSeries();
+      var line3 = new TimeSeries();
+
+      smoothie.addTimeSeries(line3,
+        { strokeStyle: 'rgba(50, 150, 200, 0.9)', lineWidth: 3 });
+      smoothie.addTimeSeries(line2,
+        { strokeStyle: 'rgba(50, 200, 150, 0.9)', lineWidth: 3 });
+      smoothie.addTimeSeries(line1,
+        { strokeStyle: 'rgba(255, 75, 75, 0.9)', lineWidth: 3 });
+
+      var updateLines = function() {
+        $.getJSON('/data/70', function(data) {
+          line1.replaceAll(data[0].times, data[0].offsets);
+          line2.replaceAll(data[1].times, data[1].offsets);
+          line3.replaceAll(data[2].times, data[2].offsets);
+        });
+      };
+
+      smoothie.streamTo(document.getElementById("mycanvas"), 10000);
+
+      setInterval(updateLines, 2000);
+      setTimeout(function() {
+        // improve performance, we don't need more than 4 fps
+        // after the startup animation 
+        smoothie.stop();
+        smoothie.options.fps = 4;
+        smoothie.options.scaleSmoothing = 1;
+        smoothie.start();
+      }, 5000);
+    </script>
+
+  </body>
+</html>
