@@ -307,10 +307,10 @@ adjustClock svr@Server{..} clock =
 -- Samples
 
 data Sample = Sample {
-      t1 :: ClockIndex
-    , t2 :: UTCTime
-    , t3 :: UTCTime
-    , t4 :: ClockIndex
+      t1 :: !ClockIndex
+    , t2 :: !UTCTime
+    , t3 :: !UTCTime
+    , t4 :: !ClockIndex
     } deriving (Show, Eq)
 
 offset :: Clock -> Sample -> Seconds

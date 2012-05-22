@@ -41,6 +41,7 @@ import Network.Wai.Handler.Warp
 import Blaze.ByteString.Builder.ByteString
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import qualified Data.Text.Read as T
 
 ------------------------------------------------------------------------
 
@@ -108,18 +109,23 @@ readNTPConfServers = servers <$> readNTPConf
 
 app :: IORef ServiceState -> Application
 app ioref req = case (requestMethod req, pathInfo req) of
-    ("GET", []) -> index
-    _           -> static
+    ("GET", ["data"])        -> getData maxBound
+    ("GET", ["data", n])     -> getData (either error fst (T.decimal n))
+    ("GET", ["favicon.ico"]) -> return (ResponseBuilder status404 [] (copyLazyByteString ""))
+    ("GET", [])              -> static req { pathInfo = ["index.html"] }
+    _                        -> static req
   where
-    static = staticApp defaultWebAppSettings req
+    static = staticApp defaultWebAppSettings
 
-    index = do
+    getData n = do
         state <- liftIO (readIORef ioref)
         return $ ResponseBuilder
             status200
             [("Content-Type", "application/json")
             ,("Server", "ntpmon/0.5")]
-            $ copyLazyByteString (encode (allServerData state))
+            $ copyLazyByteString $ encode $ map (limit n) (allServerData state)
+
+    limit n (ServerData name xs) = ServerData name (take n xs)
 
 data ServerData = ServerData String [(UTCTime, Double)]
 
