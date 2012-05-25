@@ -278,7 +278,8 @@ adjustClock svr@Server{..} clock =
     -- traceShow phase $
     -- traceShow freq $
     -- traceShow (V.take 5 weights) $
-    if nsamples < 5 || isNaN freq || isNaN phase
+    --if nsamples < 5 || isNaN freq || isNaN phase
+    if isNaN freq || isNaN phase
     then Nothing
     else Just (adjust clock, phase)
   where
@@ -286,14 +287,14 @@ adjustClock svr@Server{..} clock =
            . adjustFrequency freq
            . adjustOrigin earliestTime
 
-    nsamples       = length svrRawSamples
+    --nsamples       = length svrRawSamples
     earliestSample = last svrRawSamples
     earliestTime   = t1 earliestSample
 
     -- phase lock trades offset for jitter early on when
     -- the frequency lock hasn't settled yet
-    phaseN = min phaseSamples ((nsamples + 4) `div` 5)
-    phase  = S.meanWeighted (V.take phaseN weightedOffsets)
+    --phaseN = min phaseSamples ((nsamples + 4) `div` 5)
+    phase  = S.meanWeighted (V.take phaseSamples weightedOffsets)
 
     (_, freq) = linearRegression (V.take freqSamples times)
                                  (V.take freqSamples weightedOffsets)
