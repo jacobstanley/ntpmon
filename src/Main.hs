@@ -102,7 +102,7 @@ readNTPConfServers = servers <$> readNTPConf
 
     servers = map (T.unpack . head)
             . filter (not . null)
-            . filter (notElem "noselect")
+            -- . filter (notElem "noselect")
             . map (drop 1 . T.words)
             . filter ("server" `T.isPrefixOf`)
             . T.lines
