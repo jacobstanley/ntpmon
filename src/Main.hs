@@ -102,9 +102,9 @@ readNTPConfServers = servers <$> readNTPConf
 
     servers = map (T.unpack . head)
             . filter (not . null)
-            -- . filter (notElem "noselect")
             . map (drop 1 . T.words)
             . filter ("server" `T.isPrefixOf`)
+            . map T.stripStart
             . T.lines
 
 app :: IORef ServiceState -> Application
