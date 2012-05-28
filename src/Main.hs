@@ -14,7 +14,8 @@ import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (get, put)
 import Data.List (intercalate)
-import Data.Time.Clock (UTCTime)
+import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
+import qualified Data.Time.Clock as UTC
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format
 import System.Environment (getArgs)
@@ -166,7 +167,8 @@ monitor ioref ref ss = do
         (putStrLn . intercalate "," . map fst) headers
         (putStrLn . intercalate "," . map snd) headers
 
-    monitorLoop ioref ref ss
+    time <- liftIO UTC.getCurrentTime
+    monitorLoop ioref ref ss time
   where
     servers = ref:ss
     refName = svrHostName ref
@@ -182,45 +184,46 @@ monitor ioref ref ss = do
 
     header unit mkname s = (mkname (svrHostName s), unit)
 
+sampleInterval :: NominalDiffTime
+sampleInterval = realToFrac (1 / samplesPerSecond)
 
-monitorLoop :: IORef ServiceState -> Server -> [Server] -> NTP ()
-monitorLoop ioref ref ss = do
-    -- send requests to servers
-    mapM transmit (ref:ss)
+monitorLoop :: IORef ServiceState -> Server -> [Server] -> UTCTime -> NTP ()
+monitorLoop ioref ref ss transmitTime = do
+    currentTime <- liftIO UTC.getCurrentTime
 
-    -- wait for replies
-    liftIO $ threadDelay $ round (1000000 / samplesPerSecond)
+    -- send requests to servers (if required)
+    transmitTime' <- if transmitTime > currentTime
+                     then return transmitTime
+                     else do
+                        mapM transmit (ref:ss)
+                        return (sampleInterval `addUTCTime` currentTime)
 
     -- update any servers which received replies
-    servers@(ref':ss') <- updateServers (ref:ss)
+    servers'@(ref':ss') <- updateServers (ref:ss)
 
     -- sync clock with reference server
-    mclock <- syncClockWith ref'
+    clock <- syncClockWith ref'
 
     -- update state for web service
     liftIO $ writeIORef ioref ServiceState {
-               svcClock   = fmap fst mclock
-             , svcServers = servers
+               svcClock   = Just (fst clock)
+             , svcServers = servers'
              }
 
-    -- check if we're synchronized
-    liftIO $ case mclock of
-        Nothing -> return ()
-        Just (_clock, _off) -> do
-            -- we are, so write samples to csv
-            --_writeSamples clock (ref':ss') off
-            return ()
+    -- liftIO $ _writeSamples clock (ref':ss') off
 
-    monitorLoop ioref ref' ss'
+    -- give up our CPU time for the next 50ms
+    liftIO $ threadDelay 50000
 
-syncClockWith :: Server -> NTP (Maybe (Clock, Seconds))
+    monitorLoop ioref ref' ss' transmitTime'
+  where
+
+syncClockWith :: Server -> NTP (Clock, Seconds)
 syncClockWith server = do
     ntp@NTPData{..} <- get
-    let mclock = adjustClock server ntpClock
-    case mclock of
-        Nothing         -> return ()
-        Just (clock, _) -> put ntp { ntpClock = clock }
-    return mclock
+    let clock = adjustClock server ntpClock
+    put ntp { ntpClock = fst clock }
+    return clock
 
 _writeSamples :: Clock -> [Server] -> Seconds -> IO ()
 _writeSamples clock servers off = do
