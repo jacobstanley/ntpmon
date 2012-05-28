@@ -118,6 +118,9 @@ clockTime :: Clock -> ClockIndex -> UTCTime
 clockTime Clock{..} index = clockTime0 `add` off
   where
     off  = realToFrac (diff / freq)
+    -- TODO: Unsigned subtract breaks when index is earlier than clockIndex0.
+    --       This is the case for servers which have not responded for a while
+    --       as we continually move clockIndex0 forward using adjustOrigin.
     diff = fromIntegral (index - clockIndex0)
     freq = clockFrequency
 
@@ -273,27 +276,16 @@ phaseSamples = round (50 * samplesPerSecond)
 samplesPerSecond :: Double
 samplesPerSecond = 0.5
 
-adjustClock :: Server -> Clock -> Maybe (Clock, Seconds)
-adjustClock svr@Server{..} clock =
-    -- traceShow phase $
-    -- traceShow freq $
-    -- traceShow (V.take 5 weights) $
-    --if nsamples < 5 || isNaN freq || isNaN phase
-    if isNaN freq || isNaN phase
-    then Nothing
-    else Just (adjust clock, phase)
+adjustClock :: Server -> Clock -> (Clock, Seconds)
+adjustClock svr@Server{..} clock = (adjust clock, phase)
   where
-    adjust = adjustOffset (realToFrac phase)
-           . adjustFrequency freq
+    adjust = if isNaN phase then id else adjustOffset (realToFrac phase)
+           . if isNaN freq  then id else adjustFrequency freq
            . adjustOrigin earliestTime
 
-    --nsamples       = length svrRawSamples
     earliestSample = last svrRawSamples
     earliestTime   = t1 earliestSample
 
-    -- phase lock trades offset for jitter early on when
-    -- the frequency lock hasn't settled yet
-    --phaseN = min phaseSamples ((nsamples + 4) `div` 5)
     phase  = S.meanWeighted (V.take phaseSamples weightedOffsets)
 
     (_, freq) = linearRegression (V.take freqSamples times)
