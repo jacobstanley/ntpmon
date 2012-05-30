@@ -4,6 +4,8 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Network.NTP where
@@ -19,7 +21,9 @@ import           Control.Monad.State
 import           Data.Serialize (encode, decode)
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, diffUTCTime)
 import qualified Data.Time.Clock as T
-import qualified Data.Vector.Unboxed as V
+import qualified Data.Vector.Unboxed as U
+import qualified Data.Vector.Generic.Mutable as MGeneric
+import qualified Data.Vector.Generic as Generic
 import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
@@ -81,7 +85,7 @@ type ClockDiffD = Double
 type Seconds    = Double
 
 data Clock = Clock {
-      clockTime0      :: UTCTime
+      clockTime0      :: Timestamp
     , clockIndex0     :: ClockIndex
     , clockFrequency  :: Double
     , clockPrecision  :: Word64
@@ -104,20 +108,20 @@ initCounterClock logger = do
     logger ("Precision = " ++ showTime prec)
 
     let getCurrentIndex = readCounter
-    clockTime0  <- T.getCurrentTime
+    clockTime0  <- toTimestamp <$> T.getCurrentTime
     clockIndex0 <- getCurrentIndex
 
     return Clock{..}
 
 -- | Gets the current time according to the 'Clock'.
-getCurrentTime :: Clock -> IO UTCTime
+getCurrentTime :: Clock -> IO Timestamp
 getCurrentTime clock = clockTime clock <$> getCurrentIndex clock
 
 -- | Gets the time at the given index.
-clockTime :: Clock -> ClockIndex -> UTCTime
-clockTime Clock{..} index = clockTime0 `add` off
+clockTime :: Clock -> ClockIndex -> Timestamp
+clockTime Clock{..} index = addSeconds clockTime0 off
   where
-    off  = realToFrac (diff / freq)
+    off  = diff / freq
     -- TODO: Unsigned subtract breaks when index is earlier than clockIndex0.
     --       This is the case for servers which have not responded for a while
     --       as we continually move clockIndex0 forward using adjustOrigin.
@@ -125,10 +129,10 @@ clockTime Clock{..} index = clockTime0 `add` off
     freq = clockFrequency
 
 -- | Gets the index at the given time.
-clockIndex :: Clock -> UTCTime -> ClockIndex
+clockIndex :: Clock -> Timestamp -> ClockIndex
 clockIndex Clock{..} time = clockIndex0 + round (diff * freq)
   where
-    diff = realToFrac (time `sub` clockTime0)
+    diff = toSeconds (time - clockTime0)
     freq = clockFrequency
 
 -- | Gets a clock difference in seconds
@@ -141,10 +145,10 @@ adjustFrequency :: Double -- ^ the drift rate in seconds/second
 adjustFrequency adj c = c
     { clockFrequency = (1 - adj) * clockFrequency c }
 
-adjustOffset :: NominalDiffTime -- ^ the offset in seconds
+adjustOffset :: Seconds -- ^ the offset in seconds
              -> Clock -> Clock
 adjustOffset adj c = c
-    { clockTime0 = clockTime0 c `add` adj }
+    { clockTime0 = addSeconds (clockTime0 c) adj }
 
 adjustOrigin :: ClockIndex -- ^ the new clockIndex0
              -> Clock -> Clock
@@ -169,7 +173,7 @@ add = flip addUTCTime
 data Server = Server {
       svrHostName     :: HostName
     , svrAddress      :: SockAddr
-    , svrRawSamples   :: [Sample]
+    , svrRawSamples   :: U.Vector Sample
     , svrMinRoundtrip :: ClockDiff
     , svrBaseError    :: ClockDiff
     } deriving (Show)
@@ -186,7 +190,7 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
 resolveServers :: HostName -> IO [Server]
 resolveServers host = map (mkServer . addrAddress) <$> getHostAddrInfo
   where
-    mkServer addr = Server host addr [] 0 0
+    mkServer addr = Server host addr U.empty 0 0
 
     getHostAddrInfo = getAddrInfo hints (Just host) (Just "ntp")
 
@@ -198,7 +202,7 @@ transmit Server{..} = do
     NTPData{..} <- get
     liftIO $ do
         now <- getCurrentIndex ntpClock
-        let msg = (encode . requestMsg . toTimestamp) now
+        let msg = (encode . requestMsg . Timestamp) (fromIntegral now)
         sendAllTo ntpSocket msg svrAddress
 
 receive :: Socket -> IO ClockIndex -> IO (Either String AddrSample)
@@ -211,11 +215,7 @@ receive sock getClock = handleIOErrors $ do
   where
     handleIOErrors = handle (\(e :: IOException) -> return (Left (show e)))
 
-    mkSample t4 Packet{..} = Sample
-        { t1 = fromTimestamp ntpT1
-        , t2 = fromTimestamp ntpT2
-        , t3 = fromTimestamp ntpT3
-        , t4 = t4 }
+    mkSample t4 Packet{..} = (fromIntegral (unTimestamp ntpT1), ntpT2, ntpT3, t4)
 
 updateServers :: [Server] -> NTP [Server]
 updateServers svrs = do
@@ -250,19 +250,19 @@ updateServer svr s =
     , svrBaseError    = round (3 * stdDevRoundtrip)
     }
   where
-    minRoundtrip    = V.head bestRoundtrips
+    minRoundtrip    = U.head bestRoundtrips
     stdDevRoundtrip = S.stdDev bestRoundtrips
 
     -- Trim roundtrips so that outliers due to network congestion are
     -- not included in our quality weights.
-    roundtrips     = vector (fromIntegral . roundtrip) samples
-    bestRoundtrips = (V.take half . S.partialSort half) roundtrips
-    half           = (V.length roundtrips + 1) `div` 2
+    roundtrips     = U.map (fromIntegral . roundtrip) samples
+    bestRoundtrips = (U.take half . S.partialSort half) roundtrips
+    half           = (U.length roundtrips + 1) `div` 2
 
     -- force the evaluation of the last sample in the list
     -- to avoid building up lots of unevaluated thunks
-    samples = let xs = take maxSamples (s : svrRawSamples svr)
-              in last xs `seq` xs
+    samples = let xs = U.take maxSamples (s `U.cons` svrRawSamples svr)
+              in U.last xs `seq` xs
 
 maxSamples :: Int
 maxSamples = max phaseSamples freqSamples
@@ -279,44 +279,57 @@ samplesPerSecond = 0.5
 adjustClock :: Server -> Clock -> (Clock, Seconds)
 adjustClock svr@Server{..} clock = (adjust clock, phase)
   where
-    adjust = if isNaN phase then id else adjustOffset (realToFrac phase)
+    adjust = if isNaN phase then id else adjustOffset phase
            . if isNaN freq  then id else adjustFrequency freq
            . adjustOrigin earliestTime
 
-    earliestSample = last svrRawSamples
-    earliestTime   = t1 earliestSample
+    earliestTime = time1 (U.last svrRawSamples)
 
-    phase  = S.meanWeighted (V.take phaseSamples weightedOffsets)
+    phase  = S.meanWeighted (U.take phaseSamples weightedOffsets)
 
-    (_, freq) = linearRegression (V.take freqSamples times)
-                                 (V.take freqSamples weightedOffsets)
+    (_, freq) = linearRegression (U.take freqSamples times)
+                                 (U.take freqSamples weightedOffsets)
 
-    weightedOffsets = V.zip offsets weights
-    times   = vector (fromDiff clock . (\x -> t4 x - earliestTime)) svrRawSamples
-    offsets = vector (offset clock) svrRawSamples
-    weights = vector (quality clock svr) svrRawSamples
+    weightedOffsets = U.zip offsets weights
+    times   = U.map (fromDiff clock . (\x -> time4 x - earliestTime)) svrRawSamples
+    offsets = U.map (offset clock) svrRawSamples
+    weights = U.map (quality clock svr) svrRawSamples
 
 ------------------------------------------------------------------------
--- Samples
+-- Sample Type
 
-data Sample = Sample {
-      t1 :: !ClockIndex
-    , t2 :: !UTCTime
-    , t3 :: !UTCTime
-    , t4 :: !ClockIndex
-    } deriving (Show, Eq)
+type Sample = (ClockIndex, Timestamp, Timestamp, ClockIndex)
+
+time1 :: Sample -> ClockIndex
+time1 (x,_,_,_) = x
+
+time2 :: Sample -> Timestamp
+time2 (_,x,_,_) = x
+
+time3 :: Sample -> Timestamp
+time3 (_,_,x,_) = x
+
+time4 :: Sample -> ClockIndex
+time4 (_,_,_,x) = x
+
+deriving instance MGeneric.MVector U.MVector Timestamp
+deriving instance Generic.Vector U.Vector Timestamp
+deriving instance U.Unbox Timestamp
+
+------------------------------------------------------------------------
+-- Sample Functions
 
 offset :: Clock -> Sample -> Seconds
-offset clock sample = realToFrac (remoteTime sample `sub` localTime clock sample)
+offset clock sample = remoteTime sample `diffSeconds` localTime clock sample
 
-localTime :: Clock -> Sample -> UTCTime
-localTime clock Sample{..} = clockTime clock (t1 + (t4 - t1) `div` 2)
+localTime :: Clock -> Sample -> Timestamp
+localTime clock (t1,_,_,t4) = clockTime clock (t1 + (t4 - t1) `div` 2)
 
-remoteTime :: Sample -> UTCTime
-remoteTime Sample{..} = t2 `add` ((t3 `sub` t2) / 2)
+remoteTime :: Sample -> Timestamp
+remoteTime (_,t2,t3,_) = t2 + ((t3 - t2) `div` 2)
 
 roundtrip :: Sample -> ClockDiff
-roundtrip Sample{..} = t4 - t1
+roundtrip (t1,_,_,t4) = t4 - t1
 
 quality :: Clock -> Server -> Sample -> Double
 quality clock svr s = exp (-x*x)
@@ -336,8 +349,8 @@ currentError clock svr s = initial + drift * age
     initial = initialError clock svr s
 
     age = fromDiff clock (currentTime - sampleTime)
-    currentTime = t4 (head (svrRawSamples svr))
-    sampleTime  = t4 s
+    currentTime = time4 (U.head (svrRawSamples svr))
+    sampleTime  = time4 s
 
     drift = 1 / 10000000 -- 0.1 ppm
 
@@ -345,8 +358,8 @@ currentError clock svr s = initial + drift * age
 -- Vector/Statistics Utils
 
 -- | Maps a functions over a list and turns it in to a vector.
-vector :: (a -> Double) -> [a] -> V.Vector Double
-vector f = V.fromList . map f
+vector :: (a -> Double) -> [a] -> U.Vector Double
+vector f = U.fromList . map f
 
 -- | Simple linear regression between 2 samples.
 --   Takes two vectors Y={yi} and X={xi} and returns
@@ -354,13 +367,13 @@ vector f = V.fromList . map f
 linearRegression :: S.Sample -> S.WeightedSample -> (Double, Double)
 linearRegression xs ys = (alpha, beta)
   where
-    !c     = V.sum (V.zipWith (*) (V.map (subtract mx) xs) (V.map (subtract my . fst) ys)) / (n-1)
+    !c     = U.sum (U.zipWith (*) (U.map (subtract mx) xs) (U.map (subtract my . fst) ys)) / (n-1)
     !r     = c / (sx * sy)
     !mx    = S.mean xs
     !my    = S.meanWeighted ys
     !sx    = S.stdDev xs
     !sy    = sqrt (S.varianceWeighted ys)
-    !n     = fromIntegral (V.length xs)
+    !n     = fromIntegral (U.length xs)
     !beta  = r * sy / sx
     !alpha = my - beta * mx
 {-# INLINE linearRegression #-}

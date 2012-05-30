@@ -24,25 +24,29 @@ import System.Locale (defaultTimeLocale)
 import Text.Printf (printf)
 
 import Network.NTP
+import Data.NTP (Timestamp(..), fromTimestamp)
 import Win32Compat (getNTPConf)
 
 import Data.IORef
 import Control.Concurrent (forkIO)
 
 import Data.Aeson
-
-import Data.Data (Data, Typeable)
-import Network.Socket (SockAddr(..), PortNumber(..))
+import Data.Aeson.Encode
 
 import Network (HostName, withSocketsDo)
 import Network.HTTP.Types
 import Network.Wai
 import Network.Wai.Application.Static
 import Network.Wai.Handler.Warp
-import Blaze.ByteString.Builder.ByteString
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Read as T
+import qualified Data.Vector as V
+import qualified Data.Vector.Unboxed as U
+
+import qualified Data.Text.Lazy as LT
+import Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
+import Data.Text.Lazy.Builder (toLazyText)
 
 ------------------------------------------------------------------------
 
@@ -73,13 +77,6 @@ data ServiceState = ServiceState {
       svcClock   :: Maybe Clock
     , svcServers :: [Server]
     }
-
-deriving instance Typeable Server
-deriving instance Typeable Sample
-deriving instance Data SockAddr
-deriving instance Data PortNumber
-deriving instance Data Sample
-deriving instance Data Server
 
 emptyServiceState :: ServiceState
 emptyServiceState = ServiceState Nothing []
@@ -112,7 +109,7 @@ app :: IORef ServiceState -> Application
 app ioref req = case (requestMethod req, pathInfo req) of
     ("GET", ["data"])        -> getData maxBound
     ("GET", ["data", n])     -> getData (either error fst (T.decimal n))
-    ("GET", ["favicon.ico"]) -> return (ResponseBuilder status404 [] (copyLazyByteString ""))
+    ("GET", ["favicon.ico"]) -> return (responseLazyText status404 [] "")
     ("GET", [])              -> static req { pathInfo = ["index.html"] }
     _                        -> static req
   where
@@ -120,33 +117,41 @@ app ioref req = case (requestMethod req, pathInfo req) of
 
     getData n = do
         state <- liftIO (readIORef ioref)
-        return $ ResponseBuilder
+        return $ responseJSON
             status200
             [("Content-Type", "application/json")
             ,("Server", "ntpmon/0.5")]
-            $ copyLazyByteString $ encode $ map (limit n) (allServerData state)
+            $ (takeData n state)
 
-    limit n (ServerData name xs) = ServerData name (take n xs)
+responseLazyText :: Status -> ResponseHeaders -> LT.Text -> Response
+responseLazyText s h t = ResponseBuilder s h (fromLazyText t)
 
-data ServerData = ServerData String [(UTCTime, Double)]
+responseJSON :: ToJSON a => Status -> ResponseHeaders -> a -> Response
+responseJSON s h x = responseLazyText s h (enc x)
+  where
+    enc = toLazyText . fromValue . toJSON
+
+data ServerData = ServerData String (U.Vector Timestamp) (U.Vector Double)
 
 instance ToJSON ServerData where
-    toJSON (ServerData name xs) = object [
+    toJSON (ServerData name ts os) = object [
           "name"    .= name
-        , "times"   .= toJSON (map fst xs)
-        , "offsets" .= toJSON (map snd xs)
+        , "times"   .= toJSON utcs
+        , "offsets" .= toJSON os
         ]
+      where
+        utcs = V.map fromTimestamp (V.convert ts) :: V.Vector UTCTime
 
-allServerData :: ServiceState -> [ServerData]
-allServerData (ServiceState Nothing _)            = []
-allServerData (ServiceState (Just clock) servers) = map (serverData clock) servers
+takeData :: Int -> ServiceState -> [ServerData]
+takeData _ (ServiceState Nothing _)            = []
+takeData n (ServiceState (Just clock) servers) = map (takeServerData n clock) servers
 
-serverData :: Clock -> Server -> ServerData
-serverData clock svr = ServerData (svrName svr) (zip times offsets)
+takeServerData :: Int -> Clock -> Server -> ServerData
+takeServerData n clock svr = ServerData (svrName svr) times offsets
   where
-    samples = svrRawSamples svr
-    times   = map (localTime clock) samples
-    offsets = map (offset clock) samples
+    samples = U.take n (svrRawSamples svr)
+    times   = U.map (localTime clock) samples
+    offsets = U.map (offset clock) samples
 
 ------------------------------------------------------------------------
 
@@ -227,7 +232,7 @@ syncClockWith server = do
 
 _writeSamples :: Clock -> [Server] -> Seconds -> IO ()
 _writeSamples clock servers off = do
-    utc <- getCurrentTime clock
+    utc <- fromTimestamp <$> getCurrentTime clock
 
     let utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc
         unixTime = (init . show) (utcTimeToPOSIXSeconds utc)
@@ -240,7 +245,7 @@ _writeSamples clock servers off = do
     offMs = printf "%.9f" (off * 1000)
     freq = (show . clockFrequency) clock
 
-    samples = map (head . svrRawSamples) servers
+    samples = map (U.head . svrRawSamples) servers
     offsets = map (showMilli . offset clock) samples
     delays  = map (showMilli . fromDiff clock . roundtrip) samples
     errors  = map (showMilli . (/10) . uncurry (currentError clock)) (zip servers samples)

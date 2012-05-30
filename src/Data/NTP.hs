@@ -1,3 +1,4 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- | Most of the documentation for this module as been taken from
@@ -17,10 +18,16 @@ module Data.NTP (
 
     -- * 'Timestamp' functions
     , TimestampConvert (..)
+    , addSeconds
+    , diffSeconds
+    , fromSeconds
+    , toSeconds
+    , packTimestamp
+    , unpackTimestamp
     , ntpOrigin
     ) where
 
-import Control.Applicative ((<$>), (<*>))
+import Control.Applicative ((<$>))
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Serialize
 import Data.Time.Calendar
@@ -144,8 +151,8 @@ type ReferenceId = Word32
 -- 64-bit unsigned fixed-point number, in seconds relative to 1 January
 -- 1900. The integer part is in the first 32 bits and the fraction part
 -- in the last 32 bits.
-data Timestamp = Timestamp !Word32 !Word32
-    deriving (Eq, Show)
+newtype Timestamp = Timestamp { unTimestamp :: Word64 }
+    deriving (Eq, Show, Ord, Enum, Num, Real, Integral)
 
 -- | An NTP data packet.
 data Packet = Packet {
@@ -218,10 +225,10 @@ requestMsg :: Timestamp -> Packet
 requestMsg t3 = empty { ntpT3 = t3 }
   where
     empty = Packet NoWarning Version4 Client 0 0 0 0 0 0
-            (Timestamp 0 0)
-            (Timestamp 0 0)
-            (Timestamp 0 0)
-            (Timestamp 0 0)
+            (Timestamp 0)
+            (Timestamp 0)
+            (Timestamp 0)
+            (Timestamp 0)
 
 ------------------------------------------------------------------------
 -- Timestamps
@@ -232,32 +239,51 @@ class TimestampConvert a where
     fromTimestamp :: Timestamp -> a
 
 instance TimestampConvert UTCTime where
-    toTimestamp   = toTimestamp . (`diffUTCTime` ntpOrigin)
-    fromTimestamp = (`addUTCTime` ntpOrigin) . fromTimestamp
+    toTimestamp   = fromSeconds . (`diffUTCTime` ntpOrigin)
+    fromTimestamp = (`addUTCTime` ntpOrigin) . toSeconds
 
-instance TimestampConvert NominalDiffTime where
-    toTimestamp t = Timestamp int (truncate (frac * maxBound32))
-      where
-        (int, frac) = properFraction t
+-- | Calculates the difference between two timestamps in seconds.
+addSeconds :: RealFrac a => Timestamp -> a -> Timestamp
+addSeconds t s | s > 0     = t + fromSeconds s
+               | otherwise = t - fromSeconds s
 
-    fromTimestamp (Timestamp int frac) =
-        fromIntegral int + (fromIntegral frac / maxBound32)
+-- | Calculates the difference between two timestamps in seconds.
+diffSeconds :: RealFrac a => Timestamp -> Timestamp -> a
+diffSeconds t1 t2 | t1 > t2   = toSeconds (t1 - t2)
+                  | otherwise = -toSeconds (t2 - t1)
 
-instance TimestampConvert Word64 where
-    toTimestamp t = Timestamp int frac
-      where
-        int  = fromIntegral (t `shiftR` 32)
-        frac = fromIntegral t
+-- | Converts from a fractional number of seconds to an NTP 'Timestamp'.
+fromSeconds :: RealFrac a => a -> Timestamp
+fromSeconds t = packTimestamp int (truncate (frac * fracsPerSecond))
+  where
+    (int, frac) = properFraction t
 
-    fromTimestamp (Timestamp int frac) =
-        (fromIntegral int `shiftL` 32) .|. fromIntegral frac
+-- | Converts from an NTP 'Timestamp' to a fractional number of seconds.
+toSeconds :: RealFrac a => Timestamp -> a
+toSeconds t = fromIntegral int + (fromIntegral frac / fracsPerSecond)
+  where
+    (int, frac) = unpackTimestamp t
+
+-- | Represents the number of fractional units in one second.
+fracsPerSecond :: Real a => a
+fracsPerSecond = fromIntegral (1 `shiftL` 32 :: Word64)
+
+-- | Pack the 32-bit integer and fractional parts in to a 64-bit NTP 'Timestamp'.
+packTimestamp :: Word32 -> Word32 -> Timestamp
+packTimestamp int frac = Timestamp t
+  where
+    t = (fromIntegral int `shiftL` 32) .|. fromIntegral frac
+
+-- | Unpack the 32-bit integer and fractional parts from a 64-bit NTP 'Timestamp'.
+unpackTimestamp :: Timestamp -> (Word32, Word32)
+unpackTimestamp (Timestamp t) = (int, frac)
+  where
+    int  = fromIntegral (t `shiftR` 32)
+    frac = fromIntegral t
 
 -- | The NTP origin, 1 January 1900, as a 'UTCTime'.
 ntpOrigin :: UTCTime
 ntpOrigin = UTCTime (fromGregorian 1900 1 1) 0
-
-maxBound32 :: NominalDiffTime
-maxBound32 = fromIntegral (maxBound :: Word32)
 
 ------------------------------------------------------------------------
 -- Serialize
@@ -290,8 +316,8 @@ instance Serialize Packet where
         return Packet{..}
 
 instance Serialize Timestamp where
-    put (Timestamp int frac) = putWord32be int >> putWord32be frac
-    get = Timestamp <$> getWord32be <*> getWord32be
+    put = putWord64be . unTimestamp
+    get = Timestamp <$> getWord64be
 
 ------------------------------------------------------------------------
 -- Serializing the NTP flags (leap indicator, version, mode)
