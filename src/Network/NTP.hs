@@ -19,7 +19,6 @@ import           Control.Monad.Loops (unfoldM)
 import           Control.Monad.STM (atomically)
 import           Control.Monad.State
 import           Data.Serialize (encode, decode)
-import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, diffUTCTime)
 import qualified Data.Time.Clock as T
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MGeneric
@@ -85,7 +84,7 @@ type ClockDiffD = Double
 type Seconds    = Double
 
 data Clock = Clock {
-      clockTime0      :: Timestamp
+      clockTime0      :: Time
     , clockIndex0     :: ClockIndex
     , clockFrequency  :: Double
     , clockPrecision  :: Word64
@@ -108,18 +107,18 @@ initCounterClock logger = do
     logger ("Precision = " ++ showTime prec)
 
     let getCurrentIndex = readCounter
-    clockTime0  <- toTimestamp <$> T.getCurrentTime
+    clockTime0  <- toTime <$> T.getCurrentTime
     clockIndex0 <- getCurrentIndex
 
     return Clock{..}
 
 -- | Gets the current time according to the 'Clock'.
-getCurrentTime :: Clock -> IO Timestamp
+getCurrentTime :: Clock -> IO Time
 getCurrentTime clock = clockTime clock <$> getCurrentIndex clock
 
 -- | Gets the time at the given index.
-clockTime :: Clock -> ClockIndex -> Timestamp
-clockTime Clock{..} index = addSeconds clockTime0 off
+clockTime :: Clock -> ClockIndex -> Time
+clockTime Clock{..} index = clockTime0 `add` fromSeconds off
   where
     off  = diff / freq
     -- TODO: Unsigned subtract breaks when index is earlier than clockIndex0.
@@ -129,10 +128,10 @@ clockTime Clock{..} index = addSeconds clockTime0 off
     freq = clockFrequency
 
 -- | Gets the index at the given time.
-clockIndex :: Clock -> Timestamp -> ClockIndex
+clockIndex :: Clock -> Time -> ClockIndex
 clockIndex Clock{..} time = clockIndex0 + round (diff * freq)
   where
-    diff = toSeconds (time - clockTime0)
+    diff = toSeconds (time `sub` clockTime0)
     freq = clockFrequency
 
 -- | Gets a clock difference in seconds
@@ -148,7 +147,7 @@ adjustFrequency adj c = c
 adjustOffset :: Seconds -- ^ the offset in seconds
              -> Clock -> Clock
 adjustOffset adj c = c
-    { clockTime0 = addSeconds (clockTime0 c) adj }
+    { clockTime0 = clockTime0 c `add` fromSeconds adj }
 
 adjustOrigin :: ClockIndex -- ^ the new clockIndex0
              -> Clock -> Clock
@@ -158,14 +157,6 @@ adjustOrigin newIndex0 c = c
 
 setFrequency :: Double -> Clock -> Clock
 setFrequency freq c = c { clockFrequency = freq }
-
--- | The difference between two absolute times.
-sub :: UTCTime -> UTCTime -> NominalDiffTime
-sub = diffUTCTime
-
--- | Adds an offset to an absolute time.
-add :: UTCTime -> NominalDiffTime -> UTCTime
-add = flip addUTCTime
 
 ------------------------------------------------------------------------
 -- Server
@@ -202,7 +193,7 @@ transmit Server{..} = do
     NTPData{..} <- get
     liftIO $ do
         now <- getCurrentIndex ntpClock
-        let msg = (encode . requestMsg . Timestamp) (fromIntegral now)
+        let msg = (encode . requestMsg . Time) now
         sendAllTo ntpSocket msg svrAddress
 
 receive :: Socket -> IO ClockIndex -> IO (Either String AddrSample)
@@ -215,7 +206,7 @@ receive sock getClock = handleIOErrors $ do
   where
     handleIOErrors = handle (\(e :: IOException) -> return (Left (show e)))
 
-    mkSample t4 Packet{..} = (fromIntegral (unTimestamp ntpT1), ntpT2, ntpT3, t4)
+    mkSample t4 Packet{..} = (unTime ntpT1, ntpT2, ntpT3, t4)
 
 updateServers :: [Server] -> NTP [Server]
 updateServers svrs = do
@@ -292,41 +283,41 @@ adjustClock svr@Server{..} clock = (adjust clock, phase)
 
     weightedOffsets = U.zip offsets weights
     times   = U.map (fromDiff clock . (\x -> time4 x - earliestTime)) svrRawSamples
-    offsets = U.map (offset clock) svrRawSamples
+    offsets = U.map (toSeconds . offset clock) svrRawSamples
     weights = U.map (quality clock svr) svrRawSamples
 
 ------------------------------------------------------------------------
 -- Sample Type
 
-type Sample = (ClockIndex, Timestamp, Timestamp, ClockIndex)
+type Sample = (ClockIndex, Time, Time, ClockIndex)
 
 time1 :: Sample -> ClockIndex
 time1 (x,_,_,_) = x
 
-time2 :: Sample -> Timestamp
+time2 :: Sample -> Time
 time2 (_,x,_,_) = x
 
-time3 :: Sample -> Timestamp
+time3 :: Sample -> Time
 time3 (_,_,x,_) = x
 
 time4 :: Sample -> ClockIndex
 time4 (_,_,_,x) = x
 
-deriving instance MGeneric.MVector U.MVector Timestamp
-deriving instance Generic.Vector U.Vector Timestamp
-deriving instance U.Unbox Timestamp
+deriving instance MGeneric.MVector U.MVector Time
+deriving instance Generic.Vector U.Vector Time
+deriving instance U.Unbox Time
 
 ------------------------------------------------------------------------
 -- Sample Functions
 
-offset :: Clock -> Sample -> Seconds
-offset clock sample = remoteTime sample `diffSeconds` localTime clock sample
+offset :: Clock -> Sample -> Duration
+offset clock sample = remoteTime sample `sub` localTime clock sample
 
-localTime :: Clock -> Sample -> Timestamp
+localTime :: Clock -> Sample -> Time
 localTime clock (t1,_,_,t4) = clockTime clock (t1 + (t4 - t1) `div` 2)
 
-remoteTime :: Sample -> Timestamp
-remoteTime (_,t2,t3,_) = t2 + ((t3 - t2) `div` 2)
+remoteTime :: Sample -> Time
+remoteTime (_,t2,t3,_) = mid t2 t3
 
 roundtrip :: Sample -> ClockDiff
 roundtrip (t1,_,_,t4) = t4 - t1

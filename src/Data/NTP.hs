@@ -1,5 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Most of the documentation for this module as been taken from
 -- RFC-5905 (http://tools.ietf.org/html/rfc5905) which describes NTPv4.
@@ -10,25 +11,28 @@ module Data.NTP (
     , Mode (..)
     , Stratum
     , ReferenceId
-    , Timestamp (..)
     , Packet (..)
 
     -- * 'Packet' functions
     , requestMsg
 
-    -- * 'Timestamp' functions
-    , TimestampConvert (..)
-    , addSeconds
-    , diffSeconds
+    -- * 'Time' functions
+    , Time (..)
+    , Duration (..)
+    , TimeConvert (..)
+    , add
+    , sub
+    , mid
     , fromSeconds
     , toSeconds
-    , packTimestamp
-    , unpackTimestamp
-    , ntpOrigin
+    , packDuration
+    , unpackDuration
+    , packTime
+    , unpackTime
     ) where
 
 import Control.Applicative ((<$>))
-import Data.Bits ((.&.), (.|.), shiftL, shiftR)
+import Data.Bits (Bits, (.&.), (.|.), shiftL, shiftR)
 import Data.Serialize
 import Data.Time.Calendar
 import Data.Time.Clock
@@ -147,13 +151,6 @@ type Stratum = Word8
 -- and a timing loop might not be detected.
 type ReferenceId = Word32
 
--- | An NTP timestamp. On the wire, timestamps are represented as a
--- 64-bit unsigned fixed-point number, in seconds relative to 1 January
--- 1900. The integer part is in the first 32 bits and the fraction part
--- in the last 32 bits.
-newtype Timestamp = Timestamp { unTimestamp :: Word64 }
-    deriving (Eq, Show, Ord, Enum, Num, Real, Integral)
-
 -- | An NTP data packet.
 data Packet = Packet {
     -- | See 'LeapIndicator' for details.
@@ -202,18 +199,18 @@ data Packet = Packet {
     , ntpReferenceId :: !Word32
 
     -- | The time at which the local clock was last set or corrected.
-    , ntpReferenceTime :: !Timestamp
+    , ntpReferenceTime :: !Time
 
     -- | /Originate Time/ The time at which the request departed the client for
     -- the server.
-    , ntpT1 :: !Timestamp
+    , ntpT1 :: !Time
 
     -- | /Receive Time/ The time at which the request arrived at the server.
-    , ntpT2 :: !Timestamp
+    , ntpT2 :: !Time
 
     -- | /Transmit Time/ The time at which the reply departed the server for
     -- the client.
-    , ntpT3 :: !Timestamp
+    , ntpT3 :: !Time
 
     } deriving (Eq, Show)
 
@@ -221,69 +218,117 @@ data Packet = Packet {
 -- NTP Messages
 
 -- | A client message requesting the current time from a server.
-requestMsg :: Timestamp -> Packet
+requestMsg :: Time -> Packet
 requestMsg t3 = empty { ntpT3 = t3 }
   where
     empty = Packet NoWarning Version4 Client 0 0 0 0 0 0
-            (Timestamp 0)
-            (Timestamp 0)
-            (Timestamp 0)
-            (Timestamp 0)
+            (Time 0)
+            (Time 0)
+            (Time 0)
+            (Time 0)
 
 ------------------------------------------------------------------------
--- Timestamps
+-- Time Types
 
--- | Conversion to and from an NTP 'Timestamp'.
-class TimestampConvert a where
-    toTimestamp   :: a -> Timestamp
-    fromTimestamp :: Timestamp -> a
+-- | An NTP timestamp. On the wire, timestamps are represented as a
+-- 64-bit unsigned fixed-point number, in seconds relative to 1 January
+-- 1900. The integer part is in the first 32 bits and the fraction part
+-- in the last 32 bits.
+newtype Time = Time { unTime :: Word64 }
+    deriving (Eq, Show, Ord)
 
-instance TimestampConvert UTCTime where
-    toTimestamp   = fromSeconds . (`diffUTCTime` ntpOrigin)
-    fromTimestamp = (`addUTCTime` ntpOrigin) . toSeconds
+-- | A relative time, used in NTP timestamp arithmetic.
+newtype Duration = Duration Integer
+    deriving (Eq, Show, Ord)
 
--- | Calculates the difference between two timestamps in seconds.
-addSeconds :: RealFrac a => Timestamp -> a -> Timestamp
-addSeconds t s | s > 0     = t + fromSeconds s
-               | otherwise = t - fromSeconds s
+-- | Conversion to and from an NTP timestamp.
+class TimeConvert a where
+    toTime   :: a -> Time
+    fromTime :: Time -> a
 
--- | Calculates the difference between two timestamps in seconds.
-diffSeconds :: RealFrac a => Timestamp -> Timestamp -> a
-diffSeconds t1 t2 | t1 > t2   = toSeconds (t1 - t2)
-                  | otherwise = -toSeconds (t2 - t1)
+------------------------------------------------------------------------
+-- Time Functions
 
--- | Converts from a fractional number of seconds to an NTP 'Timestamp'.
-fromSeconds :: RealFrac a => a -> Timestamp
-fromSeconds t = packTimestamp int (truncate (frac * fracsPerSecond))
+-- | Adds a 'Duration' to a 'Time'.
+add :: Time -> Duration -> Time
+add (Time t) (Duration d)
+    | d > 0     = Time (t + fromIntegral d)
+    | otherwise = Time (t - fromIntegral (-d))
+
+-- | Adds a 'Duration' to a 'Time'.
+sub :: Time -> Time -> Duration
+sub (Time t1) (Time t2)
+    | t1 > t2   = Duration (fromIntegral (t1 - t2))
+    | otherwise = Duration (- (fromIntegral (t2 - t1)))
+
+-- | Gets the midpoint of two times.
+mid :: Time -> Time -> Time
+mid t1 t2 = t1 `add` Duration (d `div` 2)
   where
-    (int, frac) = properFraction t
+    (Duration d) = t2 `sub` t1
 
--- | Converts from an NTP 'Timestamp' to a fractional number of seconds.
-toSeconds :: RealFrac a => Timestamp -> a
-toSeconds t = fromIntegral int + (fromIntegral frac / fracsPerSecond)
+-- | Converts from a fractional number of seconds to a duration.
+fromSeconds :: RealFrac a => a -> Duration
+fromSeconds d =
+    packDuration int (truncate (frac * fracsPerSecond))
   where
-    (int, frac) = unpackTimestamp t
+    (int :: Integer, frac) = properFraction d
+
+-- | Converts from a duration to a fractional number of seconds.
+toSeconds :: RealFrac a => Duration -> a
+toSeconds d =
+    fromIntegral int + (fromIntegral frac / fracsPerSecond)
+  where
+    (int, frac) = unpackDuration d
 
 -- | Represents the number of fractional units in one second.
 fracsPerSecond :: Real a => a
 fracsPerSecond = fromIntegral (1 `shiftL` 32 :: Word64)
 
--- | Pack the 32-bit integer and fractional parts in to a 64-bit NTP 'Timestamp'.
-packTimestamp :: Word32 -> Word32 -> Timestamp
-packTimestamp int frac = Timestamp t
-  where
-    t = (fromIntegral int `shiftL` 32) .|. fromIntegral frac
+instance TimeConvert UTCTime where
+    toTime   = (add originTime) . fromSeconds . (`diffUTCTime` originUTCTime)
+    fromTime = (`addUTCTime` originUTCTime) . toSeconds . (`sub` originTime)
 
--- | Unpack the 32-bit integer and fractional parts from a 64-bit NTP 'Timestamp'.
-unpackTimestamp :: Timestamp -> (Word32, Word32)
-unpackTimestamp (Timestamp t) = (int, frac)
-  where
-    int  = fromIntegral (t `shiftR` 32)
-    frac = fromIntegral t
+------------------------------------------------------------------------
+-- Packing/Unpacking Functions
 
--- | The NTP origin, 1 January 1900, as a 'UTCTime'.
-ntpOrigin :: UTCTime
-ntpOrigin = UTCTime (fromGregorian 1900 1 1) 0
+-- | Packs an integer and fractional part in to an arbitrary precision
+-- 'Duration'.
+packDuration :: Integer -> Word32 -> Duration
+packDuration i f = Duration (pack i f)
+
+-- | Packs an integer and fractional part from an arbitrary precision
+-- 'Duration'.
+unpackDuration :: Duration -> (Integer, Word32)
+unpackDuration (Duration d) = unpack d
+
+-- | Packs an integer and fractional part in to a 64-bit 'Time'.
+packTime :: Word32 -> Word32 -> Time
+packTime i f = Time (pack i f)
+
+-- | Unpacks an integer and fractional part from a 64-bit 'Time'.
+unpackTime :: Time -> (Word32, Word32)
+unpackTime (Time t) = unpack t
+
+pack :: (Integral i, Bits p) => i -> Word32 -> p
+pack int frac = (fromIntegral int `shiftL` 32) .|. fromIntegral frac
+
+unpack :: (Integral p, Bits p, Num i) => p -> (i, Word32)
+unpack x = (int, frac)
+  where
+    int  = fromIntegral (x `shiftR` 32)
+    frac = fromIntegral x
+
+------------------------------------------------------------------------
+-- NTP Eras/Origins
+
+-- | The origin of NTP Era 0, 1 January 1900, as a 'UTCTime'.
+originUTCTime :: UTCTime
+originUTCTime = UTCTime (fromGregorian 1900 1 1) 0
+
+-- | The origin of NTP Era 0, 1 January 1900, as an NTP 'Time'.
+originTime :: Time
+originTime = Time 0
 
 ------------------------------------------------------------------------
 -- Serialize
@@ -315,9 +360,9 @@ instance Serialize Packet where
         ntpT3             <- get
         return Packet{..}
 
-instance Serialize Timestamp where
-    put = putWord64be . unTimestamp
-    get = Timestamp <$> getWord64be
+instance Serialize Time where
+    put = putWord64be . unTime
+    get = Time <$> getWord64be
 
 ------------------------------------------------------------------------
 -- Serializing the NTP flags (leap indicator, version, mode)

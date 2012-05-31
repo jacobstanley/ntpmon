@@ -24,7 +24,7 @@ import System.Locale (defaultTimeLocale)
 import Text.Printf (printf)
 
 import Network.NTP
-import Data.NTP (Timestamp(..), fromTimestamp)
+import Data.NTP (Time(..), fromTime, toSeconds)
 import Win32Compat (getNTPConf)
 
 import Data.IORef
@@ -131,7 +131,7 @@ responseJSON s h x = responseLazyText s h (enc x)
   where
     enc = toLazyText . fromValue . toJSON
 
-data ServerData = ServerData String (U.Vector Timestamp) (U.Vector Double)
+data ServerData = ServerData String (U.Vector Time) (U.Vector Double)
 
 instance ToJSON ServerData where
     toJSON (ServerData name ts os) = object [
@@ -140,7 +140,7 @@ instance ToJSON ServerData where
         , "offsets" .= toJSON os
         ]
       where
-        utcs = V.map fromTimestamp (V.convert ts) :: V.Vector UTCTime
+        utcs = V.map fromTime (V.convert ts) :: V.Vector UTCTime
 
 takeData :: Int -> ServiceState -> [ServerData]
 takeData _ (ServiceState Nothing _)            = []
@@ -151,7 +151,7 @@ takeServerData n clock svr = ServerData (svrName svr) times offsets
   where
     samples = U.take n (svrRawSamples svr)
     times   = U.map (localTime clock) samples
-    offsets = U.map (offset clock) samples
+    offsets = U.map (toSeconds . offset clock) samples
 
 ------------------------------------------------------------------------
 
@@ -204,6 +204,7 @@ monitorLoop ioref ref ss transmitTime = do
                         return (sampleInterval `addUTCTime` currentTime)
 
     -- update any servers which received replies
+    -- TODO: pass back flag to say we updated the list
     servers'@(ref':ss') <- updateServers (ref:ss)
 
     -- sync clock with reference server
@@ -221,7 +222,6 @@ monitorLoop ioref ref ss transmitTime = do
     liftIO $ threadDelay 50000
 
     monitorLoop ioref ref' ss' transmitTime'
-  where
 
 syncClockWith :: Server -> NTP (Clock, Seconds)
 syncClockWith server = do
@@ -232,7 +232,7 @@ syncClockWith server = do
 
 _writeSamples :: Clock -> [Server] -> Seconds -> IO ()
 _writeSamples clock servers off = do
-    utc <- fromTimestamp <$> getCurrentTime clock
+    utc <- fromTime <$> getCurrentTime clock
 
     let utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc
         unixTime = (init . show) (utcTimeToPOSIXSeconds utc)
@@ -246,7 +246,7 @@ _writeSamples clock servers off = do
     freq = (show . clockFrequency) clock
 
     samples = map (U.head . svrRawSamples) servers
-    offsets = map (showMilli . offset clock) samples
+    offsets = map (showMilli . toSeconds . offset clock) samples
     delays  = map (showMilli . fromDiff clock . roundtrip) samples
     errors  = map (showMilli . (/10) . uncurry (currentError clock)) (zip servers samples)
 
