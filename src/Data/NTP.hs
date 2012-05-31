@@ -242,7 +242,7 @@ newtype Time = Time { unTime :: Word64 }
 
 -- | A relative time, used in NTP timestamp arithmetic.
 newtype Duration = Duration { unDuration :: Integer }
-    deriving (Eq, Show, Ord)
+    deriving (Eq, Show, Ord, Num)
 
 ------------------------------------------------------------------------
 -- Time Functions

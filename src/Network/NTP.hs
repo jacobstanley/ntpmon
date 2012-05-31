@@ -320,8 +320,17 @@ localTime clock (t1,_,_,t4) = clockTime clock (t1 + (t4 - t1) `div` 2)
 remoteTime :: Sample -> Time
 remoteTime (_,t2,t3,_) = mid t2 t3
 
+networkDelay :: Clock -> Sample -> Duration
+networkDelay clock sample = total - server
+  where
+    total  = fromSeconds (fromDiff clock (roundtrip sample))
+    server = serverDelay sample
+
 roundtrip :: Sample -> ClockDiff
 roundtrip (t1,_,_,t4) = t4 - t1
+
+serverDelay :: Sample -> Duration
+serverDelay (_,t2,t3,_) = t3 `sub` t2
 
 quality :: Clock -> Server -> Sample -> Double
 quality clock svr s = exp (-x*x)

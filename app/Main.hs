@@ -128,27 +128,34 @@ responseJSON s h x = responseLazyText s h (enc x)
   where
     enc = toLazyText . fromValue . toJSON
 
-data ServerData = ServerData String (U.Vector Time) (U.Vector Double)
+data ServerData = ServerData {
+      sdName    :: String
+    , sdTimes   :: (U.Vector Time)
+    , sdOffsets :: (U.Vector Double)
+    , sdDelays  :: (U.Vector Double)
+    }
 
 instance ToJSON ServerData where
-    toJSON (ServerData name ts os) = object [
-          "name"    .= name
+    toJSON sd = object [
+          "name"    .= sdName sd
         , "times"   .= toJSON utcs
-        , "offsets" .= toJSON os
+        , "offsets" .= toJSON (sdOffsets sd)
+        , "delays"  .= toJSON (sdDelays sd)
         ]
       where
-        utcs = V.map toUTCTime (V.convert ts) :: V.Vector UTCTime
+        utcs = V.map toUTCTime (V.convert (sdTimes sd)) :: V.Vector UTCTime
 
 takeData :: Int -> ServiceState -> [ServerData]
 takeData _ (ServiceState Nothing _)            = []
 takeData n (ServiceState (Just clock) servers) = map (takeServerData n clock) servers
 
 takeServerData :: Int -> Clock -> Server -> ServerData
-takeServerData n clock svr = ServerData (svrName svr) times offsets
+takeServerData n clock svr = ServerData (svrName svr) times offsets delays
   where
     samples = U.take n (svrRawSamples svr)
     times   = U.map (localTime clock) samples
     offsets = U.map (toSeconds . offset clock) samples
+    delays  = U.map (toSeconds . networkDelay clock) samples
 
 ------------------------------------------------------------------------
 
