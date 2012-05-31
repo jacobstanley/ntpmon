@@ -12,19 +12,22 @@ module Data.NTP (
     , Stratum
     , ReferenceId
     , Packet (..)
+    , Time (..)
+    , Duration (..)
 
     -- * 'Packet' functions
     , requestMsg
 
     -- * 'Time' functions
-    , Time (..)
-    , Duration (..)
-    , TimeConvert (..)
     , add
     , sub
     , mid
+
     , fromSeconds
     , toSeconds
+    , fromUTCTime
+    , toUTCTime
+
     , packDuration
     , unpackDuration
     , packTime
@@ -235,16 +238,11 @@ requestMsg t3 = empty { ntpT3 = t3 }
 -- 1900. The integer part is in the first 32 bits and the fraction part
 -- in the last 32 bits.
 newtype Time = Time { unTime :: Word64 }
-    deriving (Eq, Show, Ord)
+    deriving (Eq, Show, Ord, Bounded)
 
 -- | A relative time, used in NTP timestamp arithmetic.
-newtype Duration = Duration Integer
+newtype Duration = Duration { unDuration :: Integer }
     deriving (Eq, Show, Ord)
-
--- | Conversion to and from an NTP timestamp.
-class TimeConvert a where
-    toTime   :: a -> Time
-    fromTime :: Time -> a
 
 ------------------------------------------------------------------------
 -- Time Functions
@@ -255,7 +253,7 @@ add (Time t) (Duration d)
     | d > 0     = Time (t + fromIntegral d)
     | otherwise = Time (t - fromIntegral (-d))
 
--- | Adds a 'Duration' to a 'Time'.
+-- | Subtracts a 'Time' from another 'Time'.
 sub :: Time -> Time -> Duration
 sub (Time t1) (Time t2)
     | t1 > t2   = Duration (fromIntegral (t1 - t2))
@@ -285,9 +283,17 @@ toSeconds d =
 fracsPerSecond :: Real a => a
 fracsPerSecond = fromIntegral (1 `shiftL` 32 :: Word64)
 
-instance TimeConvert UTCTime where
-    toTime   = (add originTime) . fromSeconds . (`diffUTCTime` originUTCTime)
-    fromTime = (`addUTCTime` originUTCTime) . toSeconds . (`sub` originTime)
+-- | Converts from a 'UTCTime' to an NTP 'Time'.
+fromUTCTime :: UTCTime -> Time
+fromUTCTime = (add originTime)
+            . fromSeconds
+            . (`diffUTCTime` originUTCTime)
+
+-- | Converts from an NTP 'Time to a 'UTCTime'.
+toUTCTime :: Time -> UTCTime
+toUTCTime = (`addUTCTime` originUTCTime)
+          . toSeconds
+          . (`sub` originTime)
 
 ------------------------------------------------------------------------
 -- Packing/Unpacking Functions

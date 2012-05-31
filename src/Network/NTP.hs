@@ -7,6 +7,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
 
 module Network.NTP where
 
@@ -107,7 +108,7 @@ initCounterClock logger = do
     logger ("Precision = " ++ showTime prec)
 
     let getCurrentIndex = readCounter
-    clockTime0  <- toTime <$> T.getCurrentTime
+    clockTime0  <- fromUTCTime <$> T.getCurrentTime
     clockIndex0 <- getCurrentIndex
 
     return Clock{..}

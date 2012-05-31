@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
@@ -9,44 +10,40 @@
 
 module Main (main) where
 
-import Control.Applicative ((<$>))
-import Control.Concurrent (threadDelay)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.State (get, put)
-import Data.List (intercalate)
-import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
-import qualified Data.Time.Clock as UTC
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Time.Format
-import System.Environment (getArgs)
-import System.IO
-import System.Locale (defaultTimeLocale)
-import Text.Printf (printf)
-
-import Network.NTP
-import Data.NTP (Time(..), fromTime, toSeconds)
-import Win32Compat (getNTPConf)
-
-import Data.IORef
-import Control.Concurrent (forkIO)
-
-import Data.Aeson
-import Data.Aeson.Encode
-
-import Network (HostName, withSocketsDo)
-import Network.HTTP.Types
-import Network.Wai
-import Network.Wai.Application.Static
-import Network.Wai.Handler.Warp
+import           Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
+import           Control.Applicative ((<$>))
+import           Control.Concurrent (forkIO)
+import           Control.Concurrent (threadDelay)
+import           Control.Monad.IO.Class (liftIO)
+import           Control.Monad.State (get, put)
+import           Data.Aeson
+import           Data.Aeson.Encode
+import           Data.IORef
+import           Data.List (intercalate)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import qualified Data.Text.Lazy as LT
+import           Data.Text.Lazy.Builder (toLazyText)
 import qualified Data.Text.Read as T
+import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
+import qualified Data.Time.Clock as UTC
+import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import           Data.Time.Format
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
+import           Network (HostName, withSocketsDo)
+import           Network.HTTP.Types
+import           Network.Wai
+import           Network.Wai.Application.Static
+import           Network.Wai.Handler.Warp
+import           System.Environment (getArgs)
+import           System.IO
+import           System.Locale (defaultTimeLocale)
+import           Text.Printf (printf)
 
-import qualified Data.Text.Lazy as LT
-import Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
-import Data.Text.Lazy.Builder (toLazyText)
+import           Network.NTP
+import           Data.NTP (Time(..), toUTCTime, toSeconds)
+import           Win32Compat (getNTPConf)
 
 ------------------------------------------------------------------------
 
@@ -140,7 +137,7 @@ instance ToJSON ServerData where
         , "offsets" .= toJSON os
         ]
       where
-        utcs = V.map fromTime (V.convert ts) :: V.Vector UTCTime
+        utcs = V.map toUTCTime (V.convert ts) :: V.Vector UTCTime
 
 takeData :: Int -> ServiceState -> [ServerData]
 takeData _ (ServiceState Nothing _)            = []
@@ -232,7 +229,7 @@ syncClockWith server = do
 
 _writeSamples :: Clock -> [Server] -> Seconds -> IO ()
 _writeSamples clock servers off = do
-    utc <- fromTime <$> getCurrentTime clock
+    utc <- toUTCTime <$> getCurrentTime clock
 
     let utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc
         unixTime = (init . show) (utcTimeToPOSIXSeconds utc)
