@@ -19,11 +19,12 @@ import           Control.Monad.IO.Class
 import           Control.Monad.Loops (unfoldM)
 import           Control.Monad.STM (atomically)
 import           Control.Monad.State
+import qualified Data.ByteString as B
 import           Data.Serialize (encode, decode)
 import qualified Data.Time.Clock as T
-import qualified Data.Vector.Unboxed as U
-import qualified Data.Vector.Generic.Mutable as MGeneric
 import qualified Data.Vector.Generic as Generic
+import qualified Data.Vector.Generic.Mutable as MGeneric
+import qualified Data.Vector.Unboxed as U
 import           Data.Word (Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
@@ -46,10 +47,10 @@ newtype NTP a = NTP { runNTP :: StateT NTPData IO a }
 data NTPData = NTPData {
       ntpSocket   :: Socket
     , ntpClock    :: Clock
-    , ntpIncoming :: TChan AddrSample
+    , ntpIncoming :: TChan AddrPacket
     }
 
-type AddrSample = (SockAddr, Sample)
+data AddrPacket = AddrPacket ClockIndex SockAddr Packet
 type Logger = String -> IO ()
 
 withNTP :: Logger -> NTP a -> IO a
@@ -168,6 +169,8 @@ data Server = Server {
     , svrRawSamples   :: U.Vector Sample
     , svrMinRoundtrip :: ClockDiff
     , svrBaseError    :: ClockDiff
+    , svrStratum      :: Int
+    , svrReferenceId  :: B.ByteString
     } deriving (Show)
 
 svrName :: Server -> String
@@ -182,7 +185,7 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
 resolveServers :: HostName -> IO [Server]
 resolveServers host = map (mkServer . addrAddress) <$> getHostAddrInfo
   where
-    mkServer addr = Server host addr U.empty 0 0
+    mkServer addr = Server host addr U.empty 0 0 0 B.empty
 
     getHostAddrInfo = getAddrInfo hints (Just host) (Just "ntp")
 
@@ -197,17 +200,15 @@ transmit Server{..} = do
         let msg = (encode . requestMsg . Time) now
         sendAllTo ntpSocket msg svrAddress
 
-receive :: Socket -> IO ClockIndex -> IO (Either String AddrSample)
+receive :: Socket -> IO ClockIndex -> IO (Either String AddrPacket)
 receive sock getClock = handleIOErrors $ do
     (bs, addr) <- recvFrom sock 128
     t          <- getClock
     return $ case decode bs of
         Left err  -> Left err
-        Right pkt -> Right (addr, mkSample t pkt)
+        Right pkt -> Right (AddrPacket t addr pkt)
   where
     handleIOErrors = handle (\(e :: IOException) -> return (Left (show e)))
-
-    mkSample t4 Packet{..} = (unTime ntpT1, ntpT2, ntpT3, t4)
 
 updateServers :: [Server] -> NTP [(Server, Bool)]
 updateServers svrs = do
@@ -216,11 +217,11 @@ updateServers svrs = do
         pkts <- unfoldM (tryReadChan ntpIncoming)
         return $ map (update pkts) (zip svrs (repeat False))
   where
-    update :: [AddrSample] -> (Server, Bool) -> (Server, Bool)
+    update :: [AddrPacket] -> (Server, Bool) -> (Server, Bool)
     update = fconcat . map go
       where
-        go (addr, s) (svr, up)
-          | addr == svrAddress svr = (updateServer svr s, True)
+        go (AddrPacket t addr pkt) (svr, up)
+          | addr == svrAddress svr = (updateServer svr t pkt, True)
           | otherwise              = (svr, up)
 
     fconcat :: [a -> a] -> a -> a
@@ -231,15 +232,23 @@ updateServers svrs = do
         if empty then return Nothing
                  else Just <$> readTChan chan
 
-updateServer :: Server -> Sample -> Server
-updateServer svr s =
-    --trace (printf "%-15s%8.0f%8.0f" (svrHostName svr) minRoundtrip stdDevRoundtrip) $
+updateServer :: Server -> ClockIndex -> Packet -> Server
+updateServer svr t4 p@Packet{..} =
     svr
     { svrRawSamples   = samples
     , svrMinRoundtrip = round minRoundtrip
     , svrBaseError    = round (3 * stdDevRoundtrip)
+    , svrStratum      = fromIntegral ntpStratum
+    , svrReferenceId  = decodeReferenceId p
     }
   where
+    newSample = (unTime ntpT1, ntpT2, ntpT3, t4)
+
+    -- force the evaluation of the last sample in the list
+    -- to avoid building up lots of unevaluated thunks
+    samples = let xs = U.take maxSamples (newSample `U.cons` svrRawSamples svr)
+              in U.last xs `seq` xs
+
     minRoundtrip    = U.head bestRoundtrips
     stdDevRoundtrip = S.stdDev bestRoundtrips
 
@@ -249,10 +258,6 @@ updateServer svr s =
     bestRoundtrips = (U.take half . S.partialSort half) roundtrips
     half           = (U.length roundtrips + 1) `div` 2
 
-    -- force the evaluation of the last sample in the list
-    -- to avoid building up lots of unevaluated thunks
-    samples = let xs = U.take maxSamples (s `U.cons` svrRawSamples svr)
-              in U.last xs `seq` xs
 
 maxSamples :: Int
 maxSamples = max phaseSamples freqSamples

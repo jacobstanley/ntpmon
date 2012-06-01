@@ -58,6 +58,7 @@ executable ntpmon
     , base           == 4.*
     , aeson          == 0.6.*
     , blaze-builder  == 0.3.*
+    , bytestring     == 0.9.*
     , http-types     == 0.6.*
     , mtl            == 2.0.*
     , network        == 2.3.*

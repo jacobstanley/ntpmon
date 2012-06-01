@@ -17,6 +17,7 @@ module Data.NTP (
 
     -- * 'Packet' functions
     , requestMsg
+    , decodeReferenceId
 
     -- * 'Time' functions
     , add
@@ -34,13 +35,16 @@ module Data.NTP (
     , unpackTime
     ) where
 
-import Control.Applicative ((<$>))
-import Data.Bits (Bits, (.&.), (.|.), shiftL, shiftR)
-import Data.Serialize
-import Data.Time.Calendar
-import Data.Time.Clock
-import Data.Time.Format ()
-import Data.Word (Word8, Word32, Word64)
+import           Control.Applicative ((<$>))
+import           Data.Bits (Bits, (.&.), (.|.), shiftL, shiftR)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as C
+import           Data.List (intercalate)
+import           Data.Serialize
+import           Data.Time.Calendar
+import           Data.Time.Clock
+import           Data.Time.Format ()
+import           Data.Word (Word8, Word32, Word64)
 
 ------------------------------------------------------------------------
 -- Types
@@ -199,7 +203,7 @@ data Packet = Packet {
     , ntpRootDispersion :: !Word32
 
     -- | See 'ReferenceId' for details.
-    , ntpReferenceId :: !Word32
+    , ntpReferenceId :: !ReferenceId
 
     -- | The time at which the local clock was last set or corrected.
     , ntpReferenceTime :: !Time
@@ -229,6 +233,25 @@ requestMsg t3 = empty { ntpT3 = t3 }
             (Time 0)
             (Time 0)
             (Time 0)
+
+------------------------------------------------------------------------
+-- Reference ID
+
+decodeReferenceId :: Packet -> B.ByteString
+decodeReferenceId Packet{..} =
+    case ntpStratum of
+        0 -> ascii
+        1 -> ascii
+        _ -> ipv4
+  where
+    ascii = B.pack $ takeWhile (/= 0) parts
+    ipv4  = C.pack $ intercalate "." $ map show parts
+    parts = [a,b,c,d]
+
+    a = fromIntegral (ntpReferenceId `shiftR` 24) :: Word8
+    b = fromIntegral (ntpReferenceId `shiftR` 16) :: Word8
+    c = fromIntegral (ntpReferenceId `shiftR` 8) :: Word8
+    d = fromIntegral ntpReferenceId :: Word8
 
 ------------------------------------------------------------------------
 -- Time Types

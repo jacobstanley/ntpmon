@@ -19,6 +19,7 @@ import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad.State (get, put)
 import           Data.Aeson
 import           Data.Aeson.Encode
+import qualified Data.ByteString.Char8 as B
 import           Data.IORef
 import           Data.List (intercalate)
 import qualified Data.Text as T
@@ -131,6 +132,8 @@ responseJSON s h x = responseLazyText s h (enc x)
 
 data ServerData = ServerData {
       sdName    :: String
+    , sdStratum :: Int
+    , sdRefID   :: String
     , sdTimes   :: (U.Vector Time)
     , sdOffsets :: (U.Vector Double)
     , sdDelays  :: (U.Vector Double)
@@ -139,6 +142,8 @@ data ServerData = ServerData {
 instance ToJSON ServerData where
     toJSON sd = object [
           "name"    .= sdName sd
+        , "stratum" .= sdStratum sd
+        , "refid"   .= sdRefID sd
         , "times"   .= toJSON utcs
         , "offsets" .= toJSON (sdOffsets sd)
         , "delays"  .= toJSON (sdDelays sd)
@@ -151,12 +156,16 @@ takeData _ (ServiceState Nothing _)            = []
 takeData n (ServiceState (Just clock) servers) = map (takeServerData n clock) servers
 
 takeServerData :: Int -> Clock -> Server -> ServerData
-takeServerData n clock svr = ServerData (svrName svr) times offsets delays
+takeServerData n clock svr = ServerData {
+      sdName    = svrName svr
+    , sdStratum = svrStratum svr
+    , sdRefID   = B.unpack (svrReferenceId svr)
+    , sdTimes   = U.map (localTime clock) samples
+    , sdOffsets = U.map (toSeconds . offset clock) samples
+    , sdDelays  = U.map (toSeconds . networkDelay clock) samples
+    }
   where
     samples = U.take n (svrRawSamples svr)
-    times   = U.map (localTime clock) samples
-    offsets = U.map (toSeconds . offset clock) samples
-    delays  = U.map (toSeconds . networkDelay clock) samples
 
 ------------------------------------------------------------------------
 
