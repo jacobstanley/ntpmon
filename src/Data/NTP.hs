@@ -268,8 +268,9 @@ mid t1 t2 = t1 `add` Duration (d `div` 2)
 -- | Converts from a fractional number of seconds to a duration.
 fromSeconds :: RealFrac a => a -> Duration
 fromSeconds d =
-    packDuration int (truncate (frac * fracsPerSecond))
+    packDuration (int + neg) (truncate (frac * fracsPerSecond))
   where
+    neg = if d < 0 then (-1) else 0
     (int :: Integer, frac) = properFraction d
 
 -- | Converts from a duration to a fractional number of seconds.

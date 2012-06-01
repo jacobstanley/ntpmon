@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
 module Main where
@@ -34,6 +35,15 @@ prop_add_sub_roundtrip t d = dur >= minDur ==>
 
 prop_midpoint_is_halfway t1 t2 =
     mid t1 t2 `sub` t1 == half (t2 `sub` t1)
+
+prop_toSeconds_fromSeconds_roundtrip =
+    forAll (choose (-1000, 1000)) $ \dn ->
+    let d = Duration dn
+    in abs (d - fromSeconds (toSeconds d :: Double)) < Duration 1000
+
+prop_fromSeconds_toSeconds_roundtrip =
+    forAll (choose (-10, 10)) $ \(secs :: Double) ->
+    abs (secs - toSeconds (fromSeconds secs)) < 0.001
 
 ------------------------------------------------------------------------
 -- Utils
