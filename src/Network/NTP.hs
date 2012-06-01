@@ -209,21 +209,19 @@ receive sock getClock = handleIOErrors $ do
 
     mkSample t4 Packet{..} = (unTime ntpT1, ntpT2, ntpT3, t4)
 
-updateServers :: [Server] -> NTP [Server]
+updateServers :: [Server] -> NTP [(Server, Bool)]
 updateServers svrs = do
     NTPData{..} <- get
     liftIO $ do
         pkts <- unfoldM (tryReadChan ntpIncoming)
-        --trace "" $
-        --trace (unwords $ map (show . fst) pkts) $
-        return (map (update pkts) svrs)
+        return $ map (update pkts) (zip svrs (repeat False))
   where
-    update :: [AddrSample] -> Server -> Server
+    update :: [AddrSample] -> (Server, Bool) -> (Server, Bool)
     update = fconcat . map go
       where
-        go (addr, s) svr
-          | addr == svrAddress svr = updateServer svr s
-          | otherwise              = svr
+        go (addr, s) (svr, up)
+          | addr == svrAddress svr = (updateServer svr s, True)
+          | otherwise              = (svr, up)
 
     fconcat :: [a -> a] -> a -> a
     fconcat = foldl (.) id

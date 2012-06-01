@@ -14,6 +14,7 @@ import           Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
 import           Control.Applicative ((<$>))
 import           Control.Concurrent (forkIO)
 import           Control.Concurrent (threadDelay)
+import           Control.Monad (when)
 import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad.State (get, put)
 import           Data.Aeson
@@ -198,6 +199,10 @@ sampleInterval = realToFrac (1 / samplesPerSecond)
 
 monitorLoop :: IORef ServiceState -> Server -> [Server] -> UTCTime -> NTP ()
 monitorLoop ioref ref ss transmitTime = do
+    -- give up our CPU time for the next 50ms
+    liftIO $ threadDelay 50000
+
+    -- get the current PC clock time
     currentTime <- liftIO UTC.getCurrentTime
 
     -- send requests to servers (if required)
@@ -208,31 +213,24 @@ monitorLoop ioref ref ss transmitTime = do
                         return (sampleInterval `addUTCTime` currentTime)
 
     -- update any servers which received replies
-    -- TODO: pass back flag to say we updated the list
     servers'@(ref':ss') <- updateServers (ref:ss)
 
     -- sync clock with reference server
-    clock <- syncClockWith ref'
+    when (snd ref') $ do
+        ntp <- get
+        let clock = adjustClock (fst ref') (ntpClock ntp)
+        put ntp { ntpClock = fst clock }
 
     -- update state for web service
-    liftIO $ writeIORef ioref ServiceState {
-               svcClock   = Just (fst clock)
-             , svcServers = servers'
-             }
+    when (any snd servers') $ do
+        ntp <- get
+        liftIO $ writeIORef ioref ServiceState {
+                   svcClock   = Just (ntpClock ntp)
+                 , svcServers = map fst servers'
+                 }
 
-    -- liftIO $ _writeSamples clock (ref':ss') off
-
-    -- give up our CPU time for the next 50ms
-    liftIO $ threadDelay 50000
-
-    monitorLoop ioref ref' ss' transmitTime'
-
-syncClockWith :: Server -> NTP (Clock, Seconds)
-syncClockWith server = do
-    ntp@NTPData{..} <- get
-    let clock = adjustClock server ntpClock
-    put ntp { ntpClock = fst clock }
-    return clock
+    -- loop again
+    monitorLoop ioref (fst ref') (map fst ss') transmitTime'
 
 _writeSamples :: Clock -> [Server] -> Seconds -> IO ()
 _writeSamples clock servers off = do
