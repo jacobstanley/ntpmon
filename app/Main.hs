@@ -17,14 +17,17 @@ import           Control.Concurrent (threadDelay)
 import           Control.Monad (when)
 import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad.State (get, put)
-import           Data.Aeson
+import           Data.Aeson hiding (json)
+import           Data.Aeson.Types (emptyArray)
 import           Data.Aeson.Encode
 import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy as LB
 import           Data.IORef
 import           Data.List (intercalate)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as LT
+import qualified Data.Text.Lazy.Encoding as LT
 import           Data.Text.Lazy.Builder (toLazyText)
 import qualified Data.Text.Read as T
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
@@ -75,97 +78,141 @@ usage = "NTP Monitor 0.5\n\
 data ServiceState = ServiceState {
       svcClock   :: Maybe Clock
     , svcServers :: [Server]
+    , svcConfig  :: [ServerConfig]
     }
 
 emptyServiceState :: ServiceState
-emptyServiceState = ServiceState Nothing []
+emptyServiceState = ServiceState Nothing [] []
+
+data ServerConfig = ServerConfig {
+      cfgHostName  :: HostName
+    , cfgSelection :: Selection
+    }
+
+data Selection = Prefer | Normal | NoSelect
 
 ------------------------------------------------------------------------
 -- Running as a service
 
 runService :: IO ()
 runService = do
-    hosts <- (++ ["localhost"]) <$> readNTPConfServers
-    ioref <- newIORef emptyServiceState
+    config <- readConfig
+    let hosts = map cfgHostName config ++ ["localhost"]
+    ioref <- newIORef emptyServiceState { svcConfig = config }
     forkIO (runMonitor' hosts ioref)
-    run 30030 (app ioref)
+    let app = withHeaders [("Server", "ntpmon/0.5")] (httpServer ioref)
+    run 30030 app
 
-readNTPConfServers :: IO [HostName]
-readNTPConfServers = servers <$> readNTPConf
+readConfig :: IO [ServerConfig]
+readConfig = servers <$> readNTPConf
   where
     readNTPConf = do
         path <- getNTPConf
         T.readFile path
 
-    servers = map (T.unpack . head)
+    mkServer [] = error "readConfig: tried to decode blank server entry"
+    mkServer (x:xs)
+        | elem "prefer" xs   = cfg { cfgSelection = Prefer }
+        | elem "noselect" xs = cfg { cfgSelection = NoSelect }
+        | otherwise          = cfg
+      where
+        cfg = ServerConfig { cfgHostName  = T.unpack x
+                           , cfgSelection = Normal }
+
+    servers = map mkServer
             . filter (not . null)
             . map (drop 1 . T.words)
             . filter ("server" `T.isPrefixOf`)
             . map T.stripStart
             . T.lines
 
-app :: IORef ServiceState -> Application
-app ioref req = case (requestMethod req, pathInfo req) of
-    ("GET", ["data"])        -> getData maxBound
-    ("GET", ["data", n])     -> getData (either error fst (T.decimal n))
-    ("GET", ["favicon.ico"]) -> return (responseLazyText status404 [] "")
+httpServer :: IORef ServiceState -> Application
+httpServer ioref req = case (requestMethod req, pathInfo req) of
+    ("GET", ["servers"])     -> withState $ getServers
+    ("GET", ["data"])        -> withState $ getData maxBound
+    ("GET", ["data", n])     -> withState $ getData (either error fst (T.decimal n))
+    ("BREW", _)              -> fromStatus status418
+    ("GET", ["favicon.ico"]) -> fromStatus status404
     ("GET", [])              -> static req { pathInfo = ["index.html"] }
     _                        -> static req
   where
     static = staticApp defaultWebAppSettings
 
-    getData n = do
-        state <- liftIO (readIORef ioref)
-        return $ responseJSON
-            status200
-            [("Content-Type", "application/json")
-            ,("Server", "ntpmon/0.5")]
-            $ (takeData n state)
+    withState action = liftIO (readIORef ioref) >>= return . action
+
+------------------------------------------------------------------------
+-- /servers
+
+getServers :: ServiceState -> Response
+getServers state = responseJSON status200 [] json
+  where
+    json = toJSON (map svrJSON servers)
+    svrJSON s = object [
+          "hostname"  .= cfgHostName s
+        , "selection" .= cfgSelection s
+        ]
+
+    servers = svcConfig state
+
+instance ToJSON Selection where
+  toJSON Prefer   = String "prefer"
+  toJSON Normal   = String "normal"
+  toJSON NoSelect = String "noselect"
+
+------------------------------------------------------------------------
+-- /data
+
+getData :: Int -> ServiceState -> Response
+getData n state = responseJSON status200 [] (takeData n state)
+
+takeData :: Int -> ServiceState -> Value
+takeData n (ServiceState mclock xs _) = case mclock of
+    Nothing    -> emptyArray
+    Just clock -> toJSON (map (takeServerData n clock) xs)
+
+takeServerData :: Int -> Clock -> Server -> Value
+takeServerData n clock svr = object [
+      "name"    .= svrName svr
+    , "stratum" .= svrStratum svr
+    , "refid"   .= B.unpack (svrReferenceId svr)
+    , "times"   .= toJSON utcTimes
+    , "offsets" .= toJSON offsets
+    , "delays"  .= toJSON delays
+    ]
+  where
+    samples = U.take n (svrRawSamples svr)
+
+    offsets  = U.map (toSeconds . offset clock) samples :: U.Vector Double
+    delays   = U.map (toSeconds . networkDelay clock) samples :: U.Vector Double
+
+    times    = U.map (localTime clock) samples :: U.Vector Time
+    utcTimes = V.map toUTCTime (V.convert times) :: V.Vector UTCTime
+
+------------------------------------------------------------------------
+-- WAI Utils
+
+withHeaders :: ResponseHeaders -> Middleware
+withHeaders headers app req = do
+    response <- app req
+    return $ case response of
+        ResponseFile    x hs y z -> ResponseFile    x (hs++headers) y z
+        ResponseBuilder x hs y   -> ResponseBuilder x (hs++headers) y
+        ResponseSource  x hs y   -> ResponseSource  x (hs++headers) y
+
+fromStatus :: Monad m => Status -> m Response
+fromStatus s = return (responseLazyText s hdr msg)
+  where
+    hdr = [("Content-Type", "text/plain")]
+    msg = LT.decodeUtf8 (LB.fromChunks [statusMessage s])
 
 responseLazyText :: Status -> ResponseHeaders -> LT.Text -> Response
 responseLazyText s h t = ResponseBuilder s h (fromLazyText t)
 
-responseJSON :: ToJSON a => Status -> ResponseHeaders -> a -> Response
-responseJSON s h x = responseLazyText s h (enc x)
+responseJSON :: Status -> ResponseHeaders -> Value -> Response
+responseJSON s hs x = responseLazyText s hs' (enc x)
   where
-    enc = toLazyText . fromValue . toJSON
-
-data ServerData = ServerData {
-      sdName    :: String
-    , sdStratum :: Int
-    , sdRefID   :: String
-    , sdTimes   :: (U.Vector Time)
-    , sdOffsets :: (U.Vector Double)
-    , sdDelays  :: (U.Vector Double)
-    }
-
-instance ToJSON ServerData where
-    toJSON sd = object [
-          "name"    .= sdName sd
-        , "stratum" .= sdStratum sd
-        , "refid"   .= sdRefID sd
-        , "times"   .= toJSON utcs
-        , "offsets" .= toJSON (sdOffsets sd)
-        , "delays"  .= toJSON (sdDelays sd)
-        ]
-      where
-        utcs = V.map toUTCTime (V.convert (sdTimes sd)) :: V.Vector UTCTime
-
-takeData :: Int -> ServiceState -> [ServerData]
-takeData _ (ServiceState Nothing _)            = []
-takeData n (ServiceState (Just clock) servers) = map (takeServerData n clock) servers
-
-takeServerData :: Int -> Clock -> Server -> ServerData
-takeServerData n clock svr = ServerData {
-      sdName    = svrName svr
-    , sdStratum = svrStratum svr
-    , sdRefID   = B.unpack (svrReferenceId svr)
-    , sdTimes   = U.map (localTime clock) samples
-    , sdOffsets = U.map (toSeconds . offset clock) samples
-    , sdDelays  = U.map (toSeconds . networkDelay clock) samples
-    }
-  where
-    samples = U.take n (svrRawSamples svr)
+    hs' = [("Content-Type", "application/json")] ++ hs
+    enc = toLazyText . fromValue
 
 ------------------------------------------------------------------------
 
@@ -233,7 +280,8 @@ monitorLoop ioref ref ss transmitTime = do
     -- update state for web service
     when (any snd servers') $ do
         ntp <- get
-        liftIO $ writeIORef ioref ServiceState {
+        svc <- liftIO $ readIORef ioref
+        liftIO $ writeIORef ioref svc {
                    svcClock   = Just (ntpClock ntp)
                  , svcServers = map fst servers'
                  }
