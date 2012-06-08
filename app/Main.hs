@@ -11,17 +11,19 @@
 module Main (main) where
 
 import           Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
-import           Control.Applicative ((<$>))
+import           Control.Applicative ((<$>), (<*>))
 import           Control.Concurrent (forkIO)
 import           Control.Concurrent (threadDelay)
-import           Control.Monad (when)
+import           Control.Monad (when, mzero)
 import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad.State (get, put)
-import           Data.Aeson hiding (json)
+import           Data.Aeson
 import           Data.Aeson.Types (emptyArray)
 import           Data.Aeson.Encode
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
+import           Data.Conduit (ResourceT, ($$))
+import           Data.Conduit.Attoparsec (sinkParser)
 import           Data.IORef
 import           Data.List (intercalate)
 import qualified Data.Text as T
@@ -85,11 +87,11 @@ emptyServiceState :: ServiceState
 emptyServiceState = ServiceState Nothing [] []
 
 data ServerConfig = ServerConfig {
-      cfgHostName  :: HostName
-    , cfgSelection :: Selection
+      cfgHostName :: HostName
+    , cfgMode     :: ServerMode
     }
 
-data Selection = Prefer | Normal | NoSelect
+data ServerMode = Prefer | Normal | NoSelect
 
 ------------------------------------------------------------------------
 -- Running as a service
@@ -112,12 +114,12 @@ readConfig = servers <$> readNTPConf
 
     mkServer [] = error "readConfig: tried to decode blank server entry"
     mkServer (x:xs)
-        | elem "prefer" xs   = cfg { cfgSelection = Prefer }
-        | elem "noselect" xs = cfg { cfgSelection = NoSelect }
+        | elem "prefer" xs   = cfg { cfgMode = Prefer }
+        | elem "noselect" xs = cfg { cfgMode = NoSelect }
         | otherwise          = cfg
       where
-        cfg = ServerConfig { cfgHostName  = T.unpack x
-                           , cfgSelection = Normal }
+        cfg = ServerConfig { cfgHostName = T.unpack x
+                           , cfgMode     = Normal }
 
     servers = map mkServer
             . filter (not . null)
@@ -128,13 +130,14 @@ readConfig = servers <$> readNTPConf
 
 httpServer :: IORef ServiceState -> Application
 httpServer ioref req = case (requestMethod req, pathInfo req) of
-    ("GET", ["servers"])     -> withState $ getServers
-    ("GET", ["data"])        -> withState $ getData maxBound
-    ("GET", ["data", n])     -> withState $ getData (either error fst (T.decimal n))
-    ("BREW", _)              -> fromStatus status418
-    ("GET", ["favicon.ico"]) -> fromStatus status404
-    ("GET", [])              -> static req { pathInfo = ["index.html"] }
-    _                        -> static req
+    ("GET",  ["servers"])     -> withState $ getServers
+    ("PUT",  ["servers"])     -> putServers ioref req
+    ("GET",  ["data"])        -> withState $ getData maxBound
+    ("GET",  ["data", n])     -> withState $ getData (either error fst (T.decimal n))
+    ("BREW", _)               -> fromStatus status418
+    ("GET",  ["favicon.ico"]) -> fromStatus status404
+    ("GET",  [])              -> static req { pathInfo = ["index.html"] }
+    _                         -> static req
   where
     static = staticApp defaultWebAppSettings
 
@@ -144,20 +147,42 @@ httpServer ioref req = case (requestMethod req, pathInfo req) of
 -- /servers
 
 getServers :: ServiceState -> Response
-getServers state = responseJSON status200 [] json
+getServers state = responseJSON status200 [] body
   where
-    json = toJSON (map svrJSON servers)
-    svrJSON s = object [
-          "hostname"  .= cfgHostName s
-        , "selection" .= cfgSelection s
-        ]
+    body = toJSON (svcConfig state)
 
-    servers = svcConfig state
+putServers :: IORef ServiceState -> Request -> ResourceT IO Response
+putServers ioref req = do
+    value <- requestBody req $$ sinkParser json
+    let result = fromJSON value :: Result [ServerConfig]
+    case result of
+        Error _     -> fromStatus status400
+        Success cfg -> do
+            liftIO $ modifyIORef ioref $ \x -> x { svcConfig = cfg }
+            fromStatus status200
 
-instance ToJSON Selection where
+instance ToJSON ServerConfig where
+  toJSON s = object [
+        "hostName" .= cfgHostName s
+      , "mode"     .= cfgMode s
+      ]
+
+instance FromJSON ServerConfig where
+  parseJSON (Object x) = ServerConfig
+      <$> x .: "hostName"
+      <*> x .: "mode"
+  parseJSON _          = mzero
+
+instance ToJSON ServerMode where
   toJSON Prefer   = String "prefer"
   toJSON Normal   = String "normal"
-  toJSON NoSelect = String "noselect"
+  toJSON NoSelect = String "noSelect"
+
+instance FromJSON ServerMode where
+  parseJSON (String "prefer")   = return Prefer
+  parseJSON (String "normal")   = return Normal
+  parseJSON (String "noSelect") = return NoSelect
+  parseJSON _                   = mzero
 
 ------------------------------------------------------------------------
 -- /data
@@ -200,10 +225,14 @@ withHeaders headers app req = do
         ResponseSource  x hs y   -> ResponseSource  x (hs++headers) y
 
 fromStatus :: Monad m => Status -> m Response
-fromStatus s = return (responseLazyText s hdr msg)
+fromStatus s = fromStatus' s msg
+  where
+    msg = LT.decodeUtf8 (LB.fromChunks [statusMessage s])
+
+fromStatus' :: Monad m => Status -> LT.Text -> m Response
+fromStatus' s msg = return (responseLazyText s hdr msg)
   where
     hdr = [("Content-Type", "text/plain")]
-    msg = LT.decodeUtf8 (LB.fromChunks [statusMessage s])
 
 responseLazyText :: Status -> ResponseHeaders -> LT.Text -> Response
 responseLazyText s h t = ResponseBuilder s h (fromLazyText t)
@@ -280,11 +309,10 @@ monitorLoop ioref ref ss transmitTime = do
     -- update state for web service
     when (any snd servers') $ do
         ntp <- get
-        svc <- liftIO $ readIORef ioref
-        liftIO $ writeIORef ioref svc {
-                   svcClock   = Just (ntpClock ntp)
-                 , svcServers = map fst servers'
-                 }
+        liftIO $ modifyIORef ioref $ \x -> x {
+              svcClock   = Just (ntpClock ntp)
+            , svcServers = map fst servers'
+            }
 
     -- loop again
     monitorLoop ioref (fst ref') (map fst ss') transmitTime'
