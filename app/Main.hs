@@ -12,25 +12,24 @@ module Main (main) where
 
 import           Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
 import           Control.Applicative ((<$>), (<*>))
-import           Control.Concurrent (forkIO)
-import           Control.Concurrent (threadDelay)
+import           Control.Concurrent (forkIO, threadDelay)
+import           Control.Concurrent.STM
 import           Control.Monad (when, mzero)
-import           Control.Monad.IO.Class (liftIO)
+import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Control.Monad.State (get, put)
 import           Data.Aeson
-import           Data.Aeson.Types (emptyArray)
 import           Data.Aeson.Encode
+import           Data.Aeson.Types (emptyArray)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
 import           Data.Conduit.Attoparsec (sinkParser)
-import           Data.IORef
 import           Data.List (intercalate)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as LT
-import qualified Data.Text.Lazy.Encoding as LT
 import           Data.Text.Lazy.Builder (toLazyText)
+import qualified Data.Text.Lazy.Encoding as LT
 import qualified Data.Text.Read as T
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
 import qualified Data.Time.Clock as UTC
@@ -43,7 +42,6 @@ import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static
 import           Network.Wai.Handler.Warp
-import           System.Environment (getArgs)
 import           System.IO
 import           System.Locale (defaultTimeLocale)
 import           Text.Printf (printf)
@@ -55,36 +53,16 @@ import           Win32Compat (getNTPConf)
 ------------------------------------------------------------------------
 
 main :: IO ()
-main = withSocketsDo $ do
-    args <- getArgs
-    case args of
-      []            -> putStr usage
-      ["--service"] -> runService
-      hosts         -> runMonitor hosts
-
-usage :: String
-usage = "NTP Monitor 0.5\n\
-\Usage: ntpmon REFERENCE [SERVER]..\
-\\n\
-\\n  REFERENCE  The NTP server which the other servers will be measured\
-\\n             against.\
-\\n\
-\\n  SERVER     An NTP server to monitor.\
-\\n\
-\\nNTP servers can be specified using either their hostname or IP address.\
-\\n"
+main = withSocketsDo runService
 
 ------------------------------------------------------------------------
 -- State
 
 data ServiceState = ServiceState {
-      svcClock   :: Maybe Clock
-    , svcServers :: [Server]
-    , svcConfig  :: [ServerConfig]
+      svcClock   :: TVar (Maybe Clock)
+    , svcServers :: TVar [Server]
+    , svcConfig  :: TVar [ServerConfig]
     }
-
-emptyServiceState :: ServiceState
-emptyServiceState = ServiceState Nothing [] []
 
 data ServerConfig = ServerConfig {
       cfgHostName :: HostName
@@ -93,17 +71,13 @@ data ServerConfig = ServerConfig {
 
 data ServerMode = Prefer | Normal | NoSelect
 
-------------------------------------------------------------------------
--- Running as a service
-
-runService :: IO ()
-runService = do
-    config <- readConfig
-    let hosts = map cfgHostName config ++ ["localhost"]
-    ioref <- newIORef emptyServiceState { svcConfig = config }
-    forkIO (runMonitor' hosts ioref)
-    let app = withHeaders [("Server", "ntpmon/0.5")] (httpServer ioref)
-    run 30030 app
+initState :: IO ServiceState
+initState = do
+    config     <- readConfig
+    svcClock   <- newTVarIO Nothing
+    svcServers <- newTVarIO []
+    svcConfig  <- newTVarIO config
+    return ServiceState{..}
 
 readConfig :: IO [ServerConfig]
 readConfig = servers <$> readNTPConf
@@ -128,37 +102,46 @@ readConfig = servers <$> readNTPConf
             . map T.stripStart
             . T.lines
 
-httpServer :: IORef ServiceState -> Application
-httpServer ioref req = case (requestMethod req, pathInfo req) of
-    ("GET",  ["servers"])     -> withState $ getServers
-    ("PUT",  ["servers"])     -> putServers ioref req
-    ("GET",  ["data"])        -> withState $ getData maxBound
-    ("GET",  ["data", n])     -> withState $ getData (either error fst (T.decimal n))
+------------------------------------------------------------------------
+-- Running as a service
+
+runService :: IO ()
+runService = do
+    state <- initState
+    forkIO (runMonitor state)
+    let app = withHeaders [("Server", "ntpmon/0.5")] (httpServer state)
+    run 30030 app
+
+httpServer :: ServiceState -> Application
+httpServer state req = case (requestMethod req, pathInfo req) of
+    ("GET",  ["servers"])     -> go $ getServers
+    ("PUT",  ["servers"])     -> go $ putServers req
+    ("GET",  ["data"])        -> go $ getData maxBound
+    ("GET",  ["data", n])     -> go $ getData (either error fst (T.decimal n))
     ("BREW", _)               -> fromStatus status418
     ("GET",  ["favicon.ico"]) -> fromStatus status404
     ("GET",  [])              -> static req { pathInfo = ["index.html"] }
     _                         -> static req
   where
+    go f   = f state
     static = staticApp defaultWebAppSettings
-
-    withState action = liftIO (readIORef ioref) >>= return . action
 
 ------------------------------------------------------------------------
 -- /servers
 
-getServers :: ServiceState -> Response
-getServers state = responseJSON status200 [] body
-  where
-    body = toJSON (svcConfig state)
+getServers :: ServiceState -> ResourceT IO Response
+getServers state = do
+    cfg <- readTVarIO' (svcConfig state)
+    return $ responseJSON status200 [] (toJSON cfg)
 
-putServers :: IORef ServiceState -> Request -> ResourceT IO Response
-putServers ioref req = do
+putServers :: Request -> ServiceState -> ResourceT IO Response
+putServers req state = do
     value <- requestBody req $$ sinkParser json
     let result = fromJSON value :: Result [ServerConfig]
     case result of
         Error _     -> fromStatus status400
         Success cfg -> do
-            liftIO $ modifyIORef ioref $ \x -> x { svcConfig = cfg }
+            liftIO $ atomically $ writeTVar (svcConfig state) cfg
             fromStatus status200
 
 instance ToJSON ServerConfig where
@@ -187,13 +170,17 @@ instance FromJSON ServerMode where
 ------------------------------------------------------------------------
 -- /data
 
-getData :: Int -> ServiceState -> Response
-getData n state = responseJSON status200 [] (takeData n state)
+getData :: Int -> ServiceState -> ResourceT IO Response
+getData n state = do
+    body <- atomically' $ do
+        clock   <- readTVar (svcClock state)
+        servers <- readTVar (svcServers state)
+        return (maybe emptyArray (takeData n servers) clock)
 
-takeData :: Int -> ServiceState -> Value
-takeData n (ServiceState mclock xs _) = case mclock of
-    Nothing    -> emptyArray
-    Just clock -> toJSON (map (takeServerData n clock) xs)
+    return (responseJSON status200 [] body)
+
+takeData :: Int -> [Server] -> Clock -> Value
+takeData n xs clock = toJSON $ map (takeServerData n clock) xs
 
 takeServerData :: Int -> Clock -> Server -> Value
 takeServerData n clock svr = object [
@@ -245,25 +232,24 @@ responseJSON s hs x = responseLazyText s hs' (enc x)
 
 ------------------------------------------------------------------------
 
-runMonitor :: [HostName] -> IO ()
-runMonitor hosts = newIORef emptyServiceState >>= runMonitor' hosts
-
-runMonitor' :: [HostName] -> IORef ServiceState -> IO ()
-runMonitor' hosts ioref = withNTP (hPutStrLn stderr) $ do
+runMonitor :: ServiceState -> IO ()
+runMonitor state = do
+    cfg <- readTVarIO' (svcConfig state)
+    let hosts = map cfgHostName cfg ++ ["localhost"]
     (reference:servers) <- resolve hosts
-    monitor ioref reference servers
+    withNTP (hPutStrLn stderr) (monitor state reference servers)
   where
     resolve xs = liftIO (concat <$> mapM resolveServers xs)
 
-monitor :: IORef ServiceState -> Server -> [Server] -> NTP ()
-monitor ioref ref ss = do
+monitor :: ServiceState -> Server -> [Server] -> NTP ()
+monitor state ref ss = do
     liftIO $ do
         hSetBuffering stdout LineBuffering
         (putStrLn . intercalate "," . map fst) headers
         (putStrLn . intercalate "," . map snd) headers
 
     time <- liftIO UTC.getCurrentTime
-    monitorLoop ioref ref ss time
+    monitorLoop state ref ss time
   where
     servers = ref:ss
     refName = svrHostName ref
@@ -282,8 +268,8 @@ monitor ioref ref ss = do
 sampleInterval :: NominalDiffTime
 sampleInterval = realToFrac (1 / samplesPerSecond)
 
-monitorLoop :: IORef ServiceState -> Server -> [Server] -> UTCTime -> NTP ()
-monitorLoop ioref ref ss transmitTime = do
+monitorLoop :: ServiceState -> Server -> [Server] -> UTCTime -> NTP ()
+monitorLoop state ref ss transmitTime = do
     -- give up our CPU time for the next 50ms
     liftIO $ threadDelay 50000
 
@@ -309,13 +295,12 @@ monitorLoop ioref ref ss transmitTime = do
     -- update state for web service
     when (any snd servers') $ do
         ntp <- get
-        liftIO $ modifyIORef ioref $ \x -> x {
-              svcClock   = Just (ntpClock ntp)
-            , svcServers = map fst servers'
-            }
+        atomically' $ do
+            writeTVar (svcClock state)   (Just (ntpClock ntp))
+            writeTVar (svcServers state) (map fst servers')
 
     -- loop again
-    monitorLoop ioref (fst ref') (map fst ss') transmitTime'
+    monitorLoop state (fst ref') (map fst ss') transmitTime'
 
 _writeSamples :: Clock -> [Server] -> Seconds -> IO ()
 _writeSamples clock servers off = do
@@ -341,3 +326,14 @@ showMilli :: Seconds -> String
 showMilli t = printf "%.4f" ms
   where
     ms = (1000 :: Double) * (realToFrac t)
+
+------------------------------------------------------------------------
+-- Lifted versions of STM IO functions
+
+-- | 'STM.atomically' lifted in to 'MonadIO'
+atomically' :: MonadIO m => STM a -> m a
+atomically' = liftIO . atomically
+
+-- | 'STM.readTVarIO' lifted in to 'MonadIO'
+readTVarIO' :: MonadIO m => TVar a -> m a
+readTVarIO' = liftIO . readTVarIO
