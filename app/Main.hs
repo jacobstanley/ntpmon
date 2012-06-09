@@ -39,13 +39,13 @@ import qualified Data.Vector.Unboxed as U
 import           Network (HostName, withSocketsDo)
 import           Network.HTTP.Types
 import           Network.Wai
-import           Network.Wai.Application.Static
+import           Network.Wai.Application.Static hiding (FilePath)
 import           Network.Wai.Handler.Warp
 import           System.IO
 
 import           Network.NTP
 import           Data.NTP (Time(..), toUTCTime, toSeconds)
-import           Win32Compat (getNTPConf)
+import           Win32Compat (getNTPConfPath)
 
 ------------------------------------------------------------------------
 
@@ -77,6 +77,7 @@ initState = do
 
 updateConfig :: ServiceState -> [ServerConfig] -> IO ()
 updateConfig state cfg = do
+    writeConfig cfg =<< getNTPConfPath
     let hosts = map cfgHostName cfg ++ ["localhost"]
         clock = svcClock0 state
     servers <- catMaybes <$> mapM (resolveServer clock) hosts
@@ -100,13 +101,38 @@ findByName ys x = maybe x id (find (nameEq x) ys)
   where
     nameEq = (==) `on` svrHostName
 
-readConfig :: IO [ServerConfig]
-readConfig = servers <$> readNTPConf
+writeConfig :: [ServerConfig] -> FilePath -> IO ()
+writeConfig servers path = do
+    file <- T.readFile path
+    T.writeFile path (update file)
   where
-    readNTPConf = do
-        path <- getNTPConf
-        T.readFile path
+    update = T.unlines . updateLines . map T.stripStart . T.lines
 
+    updateLines xs =
+        let (ys, zs) = break isServer xs
+        in ys ++ map mkText servers ++ filter (not . isServer) zs
+
+    nameWidth = maximum $ map (length . cfgHostName) servers
+    padding xs = T.replicate (nameWidth - length xs) " "
+
+    mkText ServerConfig{..} = T.concat
+        [ "server "
+        , T.pack cfgHostName
+        , padding cfgHostName
+        , " minpoll 3"
+        , " maxpoll 3"
+        , " iburst"
+        , case cfgMode of
+            Prefer   -> " prefer"
+            NoSelect -> " noselect"
+            _        -> ""
+        ]
+
+    isServer = ("server" `T.isPrefixOf`)
+
+readConfig :: FilePath -> IO [ServerConfig]
+readConfig path = servers <$> T.readFile path
+  where
     servers = map mkServer
             . filter (not . null)
             . map (drop 1 . T.words)
@@ -128,8 +154,8 @@ readConfig = servers <$> readNTPConf
 
 runService :: IO ()
 runService = do
-    state <- initState
-    config <- readConfig
+    state  <- initState
+    config <- readConfig =<< getNTPConfPath
     updateConfig state config
     forkIO (runMonitor state)
     let app = withHeaders [("Server", "ntpmon/0.5")] (httpServer state)
@@ -275,7 +301,11 @@ monitor state transmitTime = do
     transmitTime' <- if transmitTime > currentTime
                      then return transmitTime
                      else do
-                        mapM transmit servers
+                        -- delay after each transmission so that
+                        -- adjacent transmissions affect each other
+                        -- as little as possible
+                        let delay = liftIO (threadDelay 5000)
+                        mapM (\x -> transmit x >> delay) servers
                         return (sampleInterval `addUTCTime` currentTime)
 
     -- update any servers which received replies
