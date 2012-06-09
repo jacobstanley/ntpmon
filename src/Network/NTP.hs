@@ -20,6 +20,7 @@ import           Control.Monad.Loops (unfoldM)
 import           Control.Monad.STM (atomically)
 import           Control.Monad.State
 import qualified Data.ByteString as B
+import           Data.Int (Int64)
 import           Data.Maybe (listToMaybe)
 import           Data.Serialize (encode, decode)
 import qualified Data.Time.Clock as T
@@ -78,8 +79,8 @@ withNTP logger =
 ------------------------------------------------------------------------
 -- Clock
 
-type ClockIndex = Word64
-type ClockDiff  = Word64
+type ClockIndex = Int64
+type ClockDiff  = Int64
 type ClockDiffD = Double
 type Seconds    = Double
 
@@ -112,7 +113,7 @@ initCounterClock logger = do
 
 -- | Gets the current time according to the high res counter.
 getCurrentIndex :: IO ClockIndex
-getCurrentIndex = readCounter
+getCurrentIndex = fromIntegral <$> readCounter
 
 -- | Gets the current time according to the 'Clock'.
 getCurrentTime :: Clock -> IO Time
@@ -184,7 +185,8 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
 -- | Resolves a list of IP addresses registered for the specified
 -- hostname and creates 'Server' instances for each of them.
 resolveServer :: Clock -> HostName -> IO (Maybe Server)
-resolveServer clock host = listToMaybe . map (mkServer . addrAddress) <$> getHostAddrInfo
+resolveServer clock host = ioErrorToNothing $
+    listToMaybe . map (mkServer . addrAddress) <$> getHostAddrInfo
   where
     mkServer addr = Server host addr U.empty 0 0 0 B.empty clock
 
@@ -193,11 +195,13 @@ resolveServer clock host = listToMaybe . map (mkServer . addrAddress) <$> getHos
     hints = Just defaultHints { addrFamily     = AF_INET
                               , addrSocketType = Datagram }
 
+    ioErrorToNothing = handle (\(_ :: IOException) -> return Nothing)
+
 transmit :: Server -> NTP ()
 transmit Server{..} = do
     NTPData{..} <- get
     liftIO $ do
-        now <- getCurrentIndex
+        now <- fromIntegral <$> getCurrentIndex
         let msg = (encode . requestMsg . Time) now
         sendAllTo ntpSocket msg svrAddress
 
@@ -243,7 +247,7 @@ updateServer svr t4 p@Packet{..} =
     , svrReferenceId  = decodeReferenceId p
     }
   where
-    newSample = (unTime ntpT1, ntpT2, ntpT3, t4)
+    newSample = (fromIntegral (unTime ntpT1), ntpT2, ntpT3, t4)
 
     -- force the evaluation of the last sample in the list
     -- to avoid building up lots of unevaluated thunks
