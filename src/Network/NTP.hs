@@ -20,6 +20,7 @@ import           Control.Monad.Loops (unfoldM)
 import           Control.Monad.STM (atomically)
 import           Control.Monad.State
 import qualified Data.ByteString as B
+import           Data.Maybe (listToMaybe)
 import           Data.Serialize (encode, decode)
 import qualified Data.Time.Clock as T
 import qualified Data.Vector.Generic as Generic
@@ -46,7 +47,6 @@ newtype NTP a = NTP { runNTP :: StateT NTPData IO a }
 
 data NTPData = NTPData {
       ntpSocket   :: Socket
-    , ntpClock    :: Clock
     , ntpIncoming :: TChan AddrPacket
     }
 
@@ -59,13 +59,11 @@ withNTP logger =
   where
     create = do
         ntpSocket   <- initSocket
-        ntpClock    <- initCounterClock logger
         ntpIncoming <- newTChanIO
 
         -- receive packet loop
-        let getClock = getCurrentIndex ntpClock
         forkIO $ forever $ do
-            pkt <- receive ntpSocket getClock
+            pkt <- receive ntpSocket
             either logger (atomically . writeTChan ntpIncoming) pkt
 
         return NTPData{..}
@@ -90,7 +88,6 @@ data Clock = Clock {
     , clockIndex0     :: ClockIndex
     , clockFrequency  :: Double
     , clockPrecision  :: Word64
-    , getCurrentIndex :: IO ClockIndex
     }
 
 -- | Initializes a 'Clock' based on the high precision counter.
@@ -108,15 +105,18 @@ initCounterClock logger = do
     logger ("Frequency = " ++ showFreq freq)
     logger ("Precision = " ++ showTime prec)
 
-    let getCurrentIndex = readCounter
     clockTime0  <- fromUTCTime <$> T.getCurrentTime
     clockIndex0 <- getCurrentIndex
 
     return Clock{..}
 
+-- | Gets the current time according to the high res counter.
+getCurrentIndex :: IO ClockIndex
+getCurrentIndex = readCounter
+
 -- | Gets the current time according to the 'Clock'.
 getCurrentTime :: Clock -> IO Time
-getCurrentTime clock = clockTime clock <$> getCurrentIndex clock
+getCurrentTime clock = clockTime clock <$> getCurrentIndex
 
 -- | Gets the time at the given index.
 clockTime :: Clock -> ClockIndex -> Time
@@ -171,7 +171,8 @@ data Server = Server {
     , svrBaseError    :: ClockDiff
     , svrStratum      :: Int
     , svrReferenceId  :: B.ByteString
-    } deriving (Show)
+    , svrClock        :: Clock
+    }
 
 svrName :: Server -> String
 svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
@@ -182,10 +183,10 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
 
 -- | Resolves a list of IP addresses registered for the specified
 -- hostname and creates 'Server' instances for each of them.
-resolveServers :: HostName -> IO [Server]
-resolveServers host = map (mkServer . addrAddress) <$> getHostAddrInfo
+resolveServer :: Clock -> HostName -> IO (Maybe Server)
+resolveServer clock host = listToMaybe . map (mkServer . addrAddress) <$> getHostAddrInfo
   where
-    mkServer addr = Server host addr U.empty 0 0 0 B.empty
+    mkServer addr = Server host addr U.empty 0 0 0 B.empty clock
 
     getHostAddrInfo = getAddrInfo hints (Just host) (Just "ntp")
 
@@ -196,14 +197,14 @@ transmit :: Server -> NTP ()
 transmit Server{..} = do
     NTPData{..} <- get
     liftIO $ do
-        now <- getCurrentIndex ntpClock
+        now <- getCurrentIndex
         let msg = (encode . requestMsg . Time) now
         sendAllTo ntpSocket msg svrAddress
 
-receive :: Socket -> IO ClockIndex -> IO (Either String AddrPacket)
-receive sock getClock = handleIOErrors $ do
+receive :: Socket -> IO (Either String AddrPacket)
+receive sock = handleIOErrors $ do
     (bs, addr) <- recvFrom sock 128
-    t          <- getClock
+    t          <- getCurrentIndex
     return $ case decode bs of
         Left err  -> Left err
         Right pkt -> Right (AddrPacket t addr pkt)
@@ -234,7 +235,7 @@ updateServers svrs = do
 
 updateServer :: Server -> ClockIndex -> Packet -> Server
 updateServer svr t4 p@Packet{..} =
-    svr
+    adjustClock svr
     { svrRawSamples   = samples
     , svrMinRoundtrip = round minRoundtrip
     , svrBaseError    = round (3 * stdDevRoundtrip)
@@ -271,8 +272,8 @@ phaseSamples = round (50 * samplesPerSecond)
 samplesPerSecond :: Double
 samplesPerSecond = 0.5
 
-adjustClock :: Server -> Clock -> (Clock, Seconds)
-adjustClock svr@Server{..} clock = (adjust clock, phase)
+adjustClock :: Server -> Server
+adjustClock svr@Server{..} = svr { svrClock = adjust svrClock }
   where
     adjust = if isNaN phase then id else adjustOffset phase
            . if isNaN freq  then id else adjustFrequency freq
@@ -286,9 +287,9 @@ adjustClock svr@Server{..} clock = (adjust clock, phase)
                                  (U.take freqSamples weightedOffsets)
 
     weightedOffsets = U.zip offsets weights
-    times   = U.map (fromDiff clock . (\x -> time4 x - earliestTime)) svrRawSamples
-    offsets = U.map (toSeconds . offset clock) svrRawSamples
-    weights = U.map (quality clock svr) svrRawSamples
+    times   = U.map (fromDiff svrClock . (\x -> time4 x - earliestTime)) svrRawSamples
+    offsets = U.map (toSeconds . offset svrClock) svrRawSamples
+    weights = U.map (quality svrClock svr) svrRawSamples
 
 ------------------------------------------------------------------------
 -- Sample Type

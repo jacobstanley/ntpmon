@@ -13,18 +13,19 @@ module Main (main) where
 import           Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
 import           Control.Applicative ((<$>), (<*>))
 import           Control.Concurrent (forkIO, threadDelay)
-import           Control.Concurrent.STM
+import qualified Control.Concurrent.STM as STM
+import           Control.Concurrent.STM hiding (atomically, readTVarIO)
 import           Control.Monad (when, mzero)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
-import           Control.Monad.State (get, put)
 import           Data.Aeson
 import           Data.Aeson.Encode
-import           Data.Aeson.Types (emptyArray)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
 import           Data.Conduit.Attoparsec (sinkParser)
-import           Data.List (intercalate)
+import           Data.Function (on)
+import           Data.List (find)
+import           Data.Maybe (catMaybes)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as LT
@@ -33,8 +34,6 @@ import qualified Data.Text.Lazy.Encoding as LT
 import qualified Data.Text.Read as T
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
 import qualified Data.Time.Clock as UTC
-import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import           Data.Time.Format
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
 import           Network (HostName, withSocketsDo)
@@ -43,8 +42,6 @@ import           Network.Wai
 import           Network.Wai.Application.Static
 import           Network.Wai.Handler.Warp
 import           System.IO
-import           System.Locale (defaultTimeLocale)
-import           Text.Printf (printf)
 
 import           Network.NTP
 import           Data.NTP (Time(..), toUTCTime, toSeconds)
@@ -59,7 +56,7 @@ main = withSocketsDo runService
 -- State
 
 data ServiceState = ServiceState {
-      svcClock   :: TVar (Maybe Clock)
+      svcClock0  :: Clock
     , svcServers :: TVar [Server]
     , svcConfig  :: TVar [ServerConfig]
     }
@@ -73,11 +70,35 @@ data ServerMode = Prefer | Normal | NoSelect
 
 initState :: IO ServiceState
 initState = do
-    config     <- readConfig
-    svcClock   <- newTVarIO Nothing
+    svcClock0  <- initCounterClock (hPutStrLn stderr)
     svcServers <- newTVarIO []
-    svcConfig  <- newTVarIO config
+    svcConfig  <- newTVarIO []
     return ServiceState{..}
+
+updateConfig :: ServiceState -> [ServerConfig] -> IO ()
+updateConfig state cfg = do
+    let hosts = map cfgHostName cfg ++ ["localhost"]
+        clock = svcClock0 state
+    servers <- catMaybes <$> mapM (resolveServer clock) hosts
+    atomically $ do
+        writeTVar (svcConfig state) cfg
+        modifyTVar (svcServers state) (mergeServers servers)
+
+updateData :: ServiceState -> [Server] -> STM ()
+updateData state servers =
+    modifyTVar (svcServers state) (flip mergeServers servers)
+
+-- | Returns the server addresses from the first list combined with
+-- the server data from the second list.
+mergeServers :: [Server] -> [Server] -> [Server]
+mergeServers xs ys = map (findByName ys) xs
+
+-- Finds the server which has a matching address, or if not, simply
+-- returns the server used as the search candidate.
+findByName :: [Server] -> Server -> Server
+findByName ys x = maybe x id (find (nameEq x) ys)
+  where
+    nameEq = (==) `on` svrHostName
 
 readConfig :: IO [ServerConfig]
 readConfig = servers <$> readNTPConf
@@ -85,6 +106,13 @@ readConfig = servers <$> readNTPConf
     readNTPConf = do
         path <- getNTPConf
         T.readFile path
+
+    servers = map mkServer
+            . filter (not . null)
+            . map (drop 1 . T.words)
+            . filter ("server" `T.isPrefixOf`)
+            . map T.stripStart
+            . T.lines
 
     mkServer [] = error "readConfig: tried to decode blank server entry"
     mkServer (x:xs)
@@ -95,19 +123,14 @@ readConfig = servers <$> readNTPConf
         cfg = ServerConfig { cfgHostName = T.unpack x
                            , cfgMode     = Normal }
 
-    servers = map mkServer
-            . filter (not . null)
-            . map (drop 1 . T.words)
-            . filter ("server" `T.isPrefixOf`)
-            . map T.stripStart
-            . T.lines
-
 ------------------------------------------------------------------------
 -- Running as a service
 
 runService :: IO ()
 runService = do
     state <- initState
+    config <- readConfig
+    updateConfig state config
     forkIO (runMonitor state)
     let app = withHeaders [("Server", "ntpmon/0.5")] (httpServer state)
     run 30030 app
@@ -131,7 +154,7 @@ httpServer state req = case (requestMethod req, pathInfo req) of
 
 getServers :: ServiceState -> ResourceT IO Response
 getServers state = do
-    cfg <- readTVarIO' (svcConfig state)
+    cfg <- readTVarIO (svcConfig state)
     return $ responseJSON status200 [] (toJSON cfg)
 
 putServers :: Request -> ServiceState -> ResourceT IO Response
@@ -141,7 +164,7 @@ putServers req state = do
     case result of
         Error _     -> fromStatus status400
         Success cfg -> do
-            liftIO $ atomically $ writeTVar (svcConfig state) cfg
+            liftIO $ updateConfig state cfg
             fromStatus status200
 
 instance ToJSON ServerConfig where
@@ -172,10 +195,10 @@ instance FromJSON ServerMode where
 
 getData :: Int -> ServiceState -> ResourceT IO Response
 getData n state = do
-    body <- atomically' $ do
-        clock   <- readTVar (svcClock state)
-        servers <- readTVar (svcServers state)
-        return (maybe emptyArray (takeData n servers) clock)
+    body <- atomically $ do
+        servers@(ref:_) <- readTVar (svcServers state)
+        let clock = svrClock ref
+        return (takeData n servers clock)
 
     return (responseJSON status200 [] body)
 
@@ -234,106 +257,47 @@ responseJSON s hs x = responseLazyText s hs' (enc x)
 
 runMonitor :: ServiceState -> IO ()
 runMonitor state = do
-    cfg <- readTVarIO' (svcConfig state)
-    let hosts = map cfgHostName cfg ++ ["localhost"]
-    (reference:servers) <- resolve hosts
-    withNTP (hPutStrLn stderr) (monitor state reference servers)
-  where
-    resolve xs = liftIO (concat <$> mapM resolveServers xs)
+    time <- UTC.getCurrentTime
+    withNTP (hPutStrLn stderr) (monitor state time)
 
-monitor :: ServiceState -> Server -> [Server] -> NTP ()
-monitor state ref ss = do
-    liftIO $ do
-        hSetBuffering stdout LineBuffering
-        (putStrLn . intercalate "," . map fst) headers
-        (putStrLn . intercalate "," . map snd) headers
-
-    time <- liftIO UTC.getCurrentTime
-    monitorLoop state ref ss time
-  where
-    servers = ref:ss
-    refName = svrHostName ref
-
-    headers = [("Unix Time", "Seconds Since 1970"), ("UTC Time", "UTC Time")]
-           ++ [("Filtered Offset", "(ms)")]
-           ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x)) servers
-           ++ map (header "(ms)" (\x -> "Network Delay to " ++ x)) servers
-           ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (error)")) servers
-           ++ [ ("High Precision Counter Frequency", "(Hz)") ]
-          -- ++ map (header "(ms)" (\x -> refName ++ " vs " ++ x ++ " (filtered)")) servers
-          -- ++ map (header "(ms)" (\x -> "Network Delay to " ++ x ++ " (filtered)")) servers
-
-    header unit mkname s = (mkname (svrHostName s), unit)
-
-sampleInterval :: NominalDiffTime
-sampleInterval = realToFrac (1 / samplesPerSecond)
-
-monitorLoop :: ServiceState -> Server -> [Server] -> UTCTime -> NTP ()
-monitorLoop state ref ss transmitTime = do
+monitor :: ServiceState -> UTCTime -> NTP ()
+monitor state transmitTime = do
     -- give up our CPU time for the next 50ms
     liftIO $ threadDelay 50000
 
     -- get the current PC clock time
     currentTime <- liftIO UTC.getCurrentTime
 
+    -- read servers from tvar
+    servers <- readTVarIO (svcServers state)
+
     -- send requests to servers (if required)
     transmitTime' <- if transmitTime > currentTime
                      then return transmitTime
                      else do
-                        mapM transmit (ref:ss)
+                        mapM transmit servers
                         return (sampleInterval `addUTCTime` currentTime)
 
     -- update any servers which received replies
-    servers'@(ref':ss') <- updateServers (ref:ss)
-
-    -- sync clock with reference server
-    when (snd ref') $ do
-        ntp <- get
-        let clock = adjustClock (fst ref') (ntpClock ntp)
-        put ntp { ntpClock = fst clock }
+    servers' <- updateServers servers
 
     -- update state for web service
-    when (any snd servers') $ do
-        ntp <- get
-        atomically' $ do
-            writeTVar (svcClock state)   (Just (ntpClock ntp))
-            writeTVar (svcServers state) (map fst servers')
+    when (any snd servers') $
+        atomically $ updateData state (map fst servers')
 
     -- loop again
-    monitorLoop state (fst ref') (map fst ss') transmitTime'
+    monitor state transmitTime'
 
-_writeSamples :: Clock -> [Server] -> Seconds -> IO ()
-_writeSamples clock servers off = do
-    utc <- toUTCTime <$> getCurrentTime clock
-
-    let utcTime  = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc
-        unixTime = (init . show) (utcTimeToPOSIXSeconds utc)
-        index    = [unixTime, utcTime]
-
-    putStrLn (intercalate "," (index ++ fields))
-  where
-    fields = [offMs] ++ offsets ++ delays ++ errors ++ [freq]
-
-    offMs = printf "%.9f" (off * 1000)
-    freq = (show . clockFrequency) clock
-
-    samples = map (U.head . svrRawSamples) servers
-    offsets = map (showMilli . toSeconds . offset clock) samples
-    delays  = map (showMilli . fromDiff clock . roundtrip) samples
-    errors  = map (showMilli . (/10) . uncurry (currentError clock)) (zip servers samples)
-
-showMilli :: Seconds -> String
-showMilli t = printf "%.4f" ms
-  where
-    ms = (1000 :: Double) * (realToFrac t)
+sampleInterval :: NominalDiffTime
+sampleInterval = realToFrac (1 / samplesPerSecond)
 
 ------------------------------------------------------------------------
 -- Lifted versions of STM IO functions
 
 -- | 'STM.atomically' lifted in to 'MonadIO'
-atomically' :: MonadIO m => STM a -> m a
-atomically' = liftIO . atomically
+atomically :: MonadIO m => STM a -> m a
+atomically = liftIO . STM.atomically
 
 -- | 'STM.readTVarIO' lifted in to 'MonadIO'
-readTVarIO' :: MonadIO m => TVar a -> m a
-readTVarIO' = liftIO . readTVarIO
+readTVarIO :: MonadIO m => TVar a -> m a
+readTVarIO = liftIO . STM.readTVarIO
