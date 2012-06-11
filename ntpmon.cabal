@@ -19,6 +19,7 @@ library
   exposed-modules:
     Network.NTP
     Network.NTP.Types
+    Network.NTP.Config
     System.Counter
     Text.PrefixSI
     Win32Compat
@@ -35,6 +36,7 @@ library
     , statistics         == 0.10.*
     , statistics-linreg  == 0.2.*
     , stm                == 2.3.*
+    , text               == 0.11.*
     , time               == 1.4.*
     , transformers       == 0.2.*
     , vector             == 0.9.*

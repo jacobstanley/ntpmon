@@ -27,7 +27,6 @@ import           Data.Function (on)
 import           Data.List (find)
 import           Data.Maybe (catMaybes)
 import qualified Data.Text as T
-import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as LT
 import           Data.Text.Lazy.Builder (toLazyText)
 import qualified Data.Text.Lazy.Encoding as LT
@@ -36,7 +35,7 @@ import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
 import qualified Data.Time.Clock as UTC
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
-import           Network (HostName, withSocketsDo)
+import           Network (withSocketsDo)
 import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static hiding (FilePath)
@@ -44,6 +43,7 @@ import           Network.Wai.Handler.Warp
 import           System.IO
 
 import           Network.NTP
+import           Network.NTP.Config
 import           Network.NTP.Types (Time(..), toUTCTime, toSeconds)
 import           Win32Compat (getNTPConfPath)
 
@@ -61,13 +61,6 @@ data ServiceState = ServiceState {
     , svcConfig  :: TVar [ServerConfig]
     }
 
-data ServerConfig = ServerConfig {
-      cfgHostName :: HostName
-    , cfgMode     :: ServerMode
-    }
-
-data ServerMode = Prefer | Normal | NoSelect
-
 initState :: IO ServiceState
 initState = do
     svcClock0  <- initCounterClock (hPutStrLn stderr)
@@ -77,10 +70,9 @@ initState = do
 
 updateConfig :: ServiceState -> [ServerConfig] -> IO ()
 updateConfig state cfg = do
-    writeConfig cfg =<< getNTPConfPath
     let hosts = map cfgHostName cfg ++ ["localhost"]
         clock = svcClock0 state
-    servers <- catMaybes <$> mapM (resolveServer clock) hosts
+    servers <- catMaybes <$> mapM (resolveServer clock . T.unpack) hosts
     atomically $ do
         writeTVar (svcConfig state) cfg
         modifyTVar (svcServers state) (mergeServers servers)
@@ -101,62 +93,13 @@ findByName ys x = maybe x id (find (nameEq x) ys)
   where
     nameEq = (==) `on` svrHostName
 
-writeConfig :: [ServerConfig] -> FilePath -> IO ()
-writeConfig servers path = do
-    file <- T.readFile path
-    T.writeFile path (update file)
-  where
-    update = T.unlines . updateLines . map T.stripStart . T.lines
-
-    updateLines xs =
-        let (ys, zs) = break isServer xs
-        in ys ++ map mkText servers ++ filter (not . isServer) zs
-
-    nameWidth = maximum $ map (length . cfgHostName) servers
-    padding xs = T.replicate (nameWidth - length xs) " "
-
-    mkText ServerConfig{..} = T.concat
-        [ "server "
-        , T.pack cfgHostName
-        , padding cfgHostName
-        , " minpoll 3"
-        , " maxpoll 3"
-        , " iburst"
-        , case cfgMode of
-            Prefer   -> " prefer"
-            NoSelect -> " noselect"
-            _        -> ""
-        ]
-
-    isServer = ("server" `T.isPrefixOf`)
-
-readConfig :: FilePath -> IO [ServerConfig]
-readConfig path = servers <$> T.readFile path
-  where
-    servers = map mkServer
-            . filter (not . null)
-            . map (drop 1 . T.words)
-            . filter ("server" `T.isPrefixOf`)
-            . map T.stripStart
-            . T.lines
-
-    mkServer [] = error "readConfig: tried to decode blank server entry"
-    mkServer (x:xs)
-        | elem "prefer" xs   = cfg { cfgMode = Prefer }
-        | elem "noselect" xs = cfg { cfgMode = NoSelect }
-        | otherwise          = cfg
-      where
-        cfg = ServerConfig { cfgHostName = T.unpack x
-                           , cfgMode     = Normal }
-
 ------------------------------------------------------------------------
 -- Running as a service
 
 runService :: IO ()
 runService = do
-    state  <- initState
-    config <- readConfig =<< getNTPConfPath
-    updateConfig state config
+    state <- initState
+    updateConfig state =<< readConfig =<< getNTPConfPath
     forkIO (runMonitor state)
     let app = withHeaders [("Server", "ntpmon/0.5")] (httpServer state)
     run 30030 app
@@ -190,7 +133,9 @@ putServers req state = do
     case result of
         Error _     -> fromStatus status400
         Success cfg -> do
-            liftIO $ updateConfig state cfg
+            liftIO $ do
+                writeConfig cfg =<< getNTPConfPath
+                updateConfig state cfg
             fromStatus status200
 
 instance ToJSON ServerConfig where
