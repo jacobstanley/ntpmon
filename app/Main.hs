@@ -44,7 +44,7 @@ import           Network.Wai.Handler.Warp
 import           System.IO
 
 import           Network.NTP
-import           Data.NTP (Time(..), toUTCTime, toSeconds)
+import           Network.NTP.Types (Time(..), toUTCTime, toSeconds)
 import           Win32Compat (getNTPConfPath)
 
 ------------------------------------------------------------------------

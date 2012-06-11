@@ -33,7 +33,7 @@ import           Network.Socket.ByteString
 import qualified Statistics.Function as S
 import qualified Statistics.Sample as S
 
-import           Data.NTP hiding (Server)
+import           Network.NTP.Types hiding (Server)
 import           System.Counter
 import           Text.PrefixSI
 

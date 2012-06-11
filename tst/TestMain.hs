@@ -10,7 +10,7 @@ import Test.Framework (defaultMain)
 import Test.Framework.Providers.QuickCheck2
 import Test.QuickCheck
 
-import Data.NTP
+import Network.NTP.Types
 
 ------------------------------------------------------------------------
 -- Tests
@@ -19,6 +19,8 @@ main = defaultMain tests
 
 tests = [ testProperty "add_sub_roundtrip" prop_add_sub_roundtrip
         , testProperty "midpoint_is_halfway" prop_midpoint_is_halfway
+        , testProperty "toSeconds_fromSeconds_roundtrip" prop_toSeconds_fromSeconds_roundtrip
+        , testProperty "fromSeconds_toSeconds_roundtrip" prop_fromSeconds_toSeconds_roundtrip
         ]
 
 prop_add_sub_roundtrip t d = dur >= minDur ==>

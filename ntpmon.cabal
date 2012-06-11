@@ -17,8 +17,8 @@ flag tsc
 library
   hs-source-dirs: src
   exposed-modules:
-    Data.NTP
     Network.NTP
+    Network.NTP.Types
     System.Counter
     Text.PrefixSI
     Win32Compat

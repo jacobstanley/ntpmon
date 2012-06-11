@@ -4,7 +4,7 @@
 
 -- | Most of the documentation for this module as been taken from
 -- RFC-5905 (http://tools.ietf.org/html/rfc5905) which describes NTPv4.
-module Data.NTP (
+module Network.NTP.Types (
     -- * Types
       LeapIndicator (..)
     , Version (..)
