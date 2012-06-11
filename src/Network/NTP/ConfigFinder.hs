@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Win32Compat (getNTPConfPath) where
+module Network.NTP.ConfigFinder (findConfig) where
 
 import System.Directory (doesFileExist)
 
@@ -15,17 +15,17 @@ import System.Win32 (hKEY_LOCAL_MACHINE, regOpenKey, regCloseKey, regQueryValue)
 
 ------------------------------------------------------------------------
 
-getNTPConfPath :: IO FilePath
-getNTPConfPath = do
-    conf <- findConfig
+findConfig :: IO FilePath
+findConfig = do
+    conf <- findPossibleConfig
     ok   <- doesFileExist conf
     if ok then return conf
-          else error $ "getNTPConfPath: " ++ conf ++ " does not exist"
+          else error $ "findConfig: " ++ conf ++ " does not exist"
 
 #ifdef mingw32_HOST_OS
 
-findConfig :: IO FilePath
-findConfig = do
+findPossibleConfig :: IO FilePath
+findPossibleConfig = do
     cmd <- handleIOError getServiceCmd
     case findConf cmd of
       Just conf -> return conf
@@ -50,7 +50,7 @@ findConfig = do
 
 #else
 
-findConfig :: IO FilePath
-findConfig = return "/etc/ntp.conf"
+findPossibleConfig :: IO FilePath
+findPossibleConfig = return "/etc/ntp.conf"
 
 #endif

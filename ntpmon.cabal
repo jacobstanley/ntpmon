@@ -20,9 +20,9 @@ library
     Network.NTP
     Network.NTP.Types
     Network.NTP.Config
+    Network.NTP.ConfigFinder
     System.Counter
     Text.PrefixSI
-    Win32Compat
 
   build-depends:
       base               == 4.*

@@ -44,8 +44,8 @@ import           System.IO
 
 import           Network.NTP
 import           Network.NTP.Config
+import           Network.NTP.ConfigFinder (findConfig)
 import           Network.NTP.Types (Time(..), toUTCTime, toSeconds)
-import           Win32Compat (getNTPConfPath)
 
 ------------------------------------------------------------------------
 
@@ -99,7 +99,7 @@ findByName ys x = maybe x id (find (nameEq x) ys)
 runService :: IO ()
 runService = do
     state <- initState
-    updateConfig state =<< readConfig =<< getNTPConfPath
+    updateConfig state =<< readConfig =<< findConfig
     forkIO (runMonitor state)
     let app = withHeaders [("Server", "ntpmon/0.5")] (httpServer state)
     run 30030 app
@@ -134,7 +134,7 @@ putServers req state = do
         Error _     -> fromStatus status400
         Success cfg -> do
             liftIO $ do
-                writeConfig cfg =<< getNTPConfPath
+                writeConfig cfg =<< findConfig
                 updateConfig state cfg
             fromStatus status200
 
