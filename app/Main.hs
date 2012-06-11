@@ -246,11 +246,8 @@ monitor state transmitTime = do
     transmitTime' <- if transmitTime > currentTime
                      then return transmitTime
                      else do
-                        -- delay after each transmission so that
-                        -- adjacent transmissions affect each other
-                        -- as little as possible
-                        let delay = liftIO (threadDelay 5000)
-                        mapM (\x -> transmit x >> delay) servers
+                        sendRequests servers
+                        -- TODO: Write CSV log here
                         return (sampleInterval `addUTCTime` currentTime)
 
     -- update any servers which received replies
@@ -262,6 +259,12 @@ monitor state transmitTime = do
 
     -- loop again
     monitor state transmitTime'
+
+  where
+    -- sendRequests inserts a 5ms delay after each transmission so that
+    -- adjacent requests affect each other as little as possible
+    sendRequests = mapM (\x -> transmit x >> delay5ms)
+    delay5ms = liftIO (threadDelay 5000)
 
 sampleInterval :: NominalDiffTime
 sampleInterval = realToFrac (1 / samplesPerSecond)
