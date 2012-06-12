@@ -22,6 +22,7 @@ library
     Network.NTP.Config
     Network.NTP.ConfigFinder
     System.Counter
+    System.Win32File
     Text.PrefixSI
 
   build-depends:
@@ -63,6 +64,7 @@ executable ntpmon
     , blaze-builder      == 0.3.*
     , bytestring         == 0.9.*
     , conduit            == 0.4.*
+    , double-conversion  == 0.2.*
     , http-types         == 0.6.*
     , mtl                == 2.0.*
     , network            == 2.3.*
@@ -76,6 +78,9 @@ executable ntpmon
     , wai-app-static     == 1.2.*
     , wai-extra          == 1.2.*
     , warp               == 1.2.*
+
+  ghc-prof-options:
+    -fprof-auto
 
   ghc-options:
     -O2 -Wall -rtsopts -threaded

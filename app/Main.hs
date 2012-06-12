@@ -23,6 +23,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
 import           Data.Conduit.Attoparsec (sinkParser)
+import           Data.Double.Conversion.Text (toFixed, toShortest)
 import           Data.Function (on)
 import           Data.List (find)
 import           Data.Maybe (catMaybes)
@@ -33,6 +34,7 @@ import qualified Data.Text.Lazy.Encoding as LT
 import qualified Data.Text.Read as T
 import           Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime)
 import qualified Data.Time.Clock as UTC
+import           Data.Time.Format (formatTime)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
 import           Network (withSocketsDo)
@@ -40,12 +42,14 @@ import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static hiding (FilePath)
 import           Network.Wai.Handler.Warp
+import           System.Locale (defaultTimeLocale)
 import           System.IO
 
 import           Network.NTP
 import           Network.NTP.Config
 import           Network.NTP.ConfigFinder (findConfig)
 import           Network.NTP.Types (Time(..), toUTCTime, toSeconds)
+import           System.Win32File
 
 ------------------------------------------------------------------------
 
@@ -75,16 +79,18 @@ updateConfig state cfg = do
     servers <- catMaybes <$> mapM (resolveServer clock . T.unpack) hosts
     atomically $ do
         writeTVar (svcConfig state) cfg
-        modifyTVar (svcServers state) (mergeServers servers)
+        modifyTVar' (svcServers state) (mergeServers servers)
 
 updateData :: ServiceState -> [Server] -> STM ()
 updateData state servers =
-    modifyTVar (svcServers state) (flip mergeServers servers)
+    modifyTVar' (svcServers state) (flip mergeServers servers)
 
 -- | Returns the server addresses from the first list combined with
 -- the server data from the second list.
 mergeServers :: [Server] -> [Server] -> [Server]
-mergeServers xs ys = map (findByName ys) xs
+mergeServers xs ys = length zs `seq` zs
+  where
+    zs = map (findByName ys) xs
 
 -- Finds the server which has a matching address, or if not, simply
 -- returns the server used as the search candidate.
@@ -229,10 +235,11 @@ responseJSON s hs x = responseLazyText s hs' (enc x)
 runMonitor :: ServiceState -> IO ()
 runMonitor state = do
     time <- UTC.getCurrentTime
-    withNTP (hPutStrLn stderr) (monitor state time)
+    file <- newDailyLogger "."
+    withNTP (hPutStrLn stderr) (monitor state file time)
 
-monitor :: ServiceState -> UTCTime -> NTP ()
-monitor state transmitTime = do
+monitor :: ServiceState -> FileLogger -> UTCTime -> NTP ()
+monitor state file transmitTime = do
     -- give up our CPU time for the next 50ms
     liftIO $ threadDelay 50000
 
@@ -247,7 +254,7 @@ monitor state transmitTime = do
                      then return transmitTime
                      else do
                         sendRequests servers
-                        -- TODO: Write CSV log here
+                        liftIO (writeCSV file servers)
                         return (sampleInterval `addUTCTime` currentTime)
 
     -- update any servers which received replies
@@ -258,7 +265,7 @@ monitor state transmitTime = do
         atomically $ updateData state (map fst servers')
 
     -- loop again
-    monitor state transmitTime'
+    monitor state file transmitTime'
 
   where
     -- sendRequests inserts a 5ms delay after each transmission so that
@@ -268,6 +275,33 @@ monitor state transmitTime = do
 
 sampleInterval :: NominalDiffTime
 sampleInterval = realToFrac (1 / samplesPerSecond)
+
+writeCSV :: FileLogger -> [Server] -> IO ()
+writeCSV file xs | empty     = return ()
+                 | otherwise = write
+  where
+    write = do
+        utc <- toUTCTime <$> getCurrentTime clock
+        let time = T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc)
+            line = T.intercalate "," (time : fields) `T.append` "\r\n"
+        appendText file utc line
+
+    clock = svrClock (head xs)
+
+    fields = offsets ++ delays ++ [origin, freq]
+
+    freq   = (toShortest . clockFrequency) clock
+    origin = (T.pack . show . clockIndex0) clock
+
+    empty   = null xs || any (U.null . svrRawSamples) xs
+    samples = map (U.head . svrRawSamples) xs
+    offsets = map (showMilli . toSeconds . offset clock) samples
+    delays  = map (showMilli . fromDiff clock . roundtrip) samples
+
+showMilli :: Seconds -> T.Text
+showMilli t = toFixed 4 ms
+  where
+    ms = (1000 :: Double) * (realToFrac t)
 
 ------------------------------------------------------------------------
 -- Lifted versions of STM IO functions

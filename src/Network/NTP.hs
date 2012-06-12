@@ -20,6 +20,7 @@ import           Control.Monad.Loops (unfoldM)
 import           Control.Monad.STM (atomically)
 import           Control.Monad.State
 import qualified Data.ByteString as B
+import           Data.IORef
 import           Data.Int (Int64)
 import           Data.Maybe (listToMaybe)
 import           Data.Serialize (encode, decode)
@@ -49,27 +50,36 @@ newtype NTP a = NTP { runNTP :: StateT NTPData IO a }
 data NTPData = NTPData {
       ntpSocket   :: Socket
     , ntpIncoming :: TChan AddrPacket
+    , ntpRunning  :: IORef Bool
     }
 
 data AddrPacket = AddrPacket ClockIndex SockAddr Packet
 type Logger = String -> IO ()
 
 withNTP :: Logger -> NTP a -> IO a
-withNTP logger =
+withNTP writeLog =
     fmap fst . withSocketsDo . bracket create destroy . runStateT . runNTP
   where
     create = do
         ntpSocket   <- initSocket
         ntpIncoming <- newTChanIO
+        ntpRunning  <- newIORef True
 
-        -- receive packet loop
-        forkIO $ forever $ do
-            pkt <- receive ntpSocket
-            either logger (atomically . writeTChan ntpIncoming) pkt
+        let enqueue = atomically . writeTChan ntpIncoming
+            receiveLoop = do
+              pkt <- receive ntpSocket
+              ok  <- readIORef ntpRunning
+              if ok then either writeLog enqueue pkt >> receiveLoop
+                    else return ()
+
+        -- start receive packet loop
+        forkIO receiveLoop
 
         return NTPData{..}
 
-    destroy NTPData{..} = sClose ntpSocket
+    destroy NTPData{..} = do
+        writeIORef ntpRunning False
+        sClose ntpSocket
 
     initSocket = do
         sock <- socket AF_INET Datagram defaultProtocol
