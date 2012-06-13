@@ -23,7 +23,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
 import           Data.Conduit.Attoparsec (sinkParser)
-import           Data.Double.Conversion.Text (toFixed, toShortest)
+import           Data.Double.Conversion.Text (toFixed)
 import           Data.Function (on)
 import           Data.List (find)
 import           Data.Maybe (catMaybes)
@@ -235,10 +235,10 @@ responseJSON s hs x = responseLazyText s hs' (enc x)
 runMonitor :: ServiceState -> IO ()
 runMonitor state = do
     time <- UTC.getCurrentTime
-    file <- newDailyLogger "."
+    file <- newRecordLogger "."
     withNTP (hPutStrLn stderr) (monitor state file time)
 
-monitor :: ServiceState -> FileLogger -> UTCTime -> NTP ()
+monitor :: ServiceState -> RecordLogger -> UTCTime -> NTP ()
 monitor state file transmitTime = do
     -- give up our CPU time for the next 50ms
     liftIO $ threadDelay 50000
@@ -276,27 +276,40 @@ monitor state file transmitTime = do
 sampleInterval :: NominalDiffTime
 sampleInterval = realToFrac (1 / samplesPerSecond)
 
-writeCSV :: FileLogger -> [Server] -> IO ()
-writeCSV file xs | empty     = return ()
-                 | otherwise = write
+------------------------------------------------------------------------
+-- CSV Logging
+
+writeCSV :: RecordLogger -> [Server] -> IO ()
+writeCSV _    []       = return ()
+writeCSV file xs@(x:_) = do
+    utc <- toUTCTime <$> getCurrentTime (svrClock x)
+    case (csvHeaders xs, csvRecord utc xs) of
+        (Just hdr, Just rec) -> writeRecord file utc hdr rec
+        _                    -> return ()
+
+csvRecord :: UTCTime -> [Server] -> Maybe T.Text
+csvRecord utc xs | empty     = Nothing
+                 | otherwise = Just record
   where
-    write = do
-        utc <- toUTCTime <$> getCurrentTime clock
-        let time = T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc)
-            line = T.intercalate "," (time : fields) `T.append` "\r\n"
-        appendText file utc line
+    empty = null xs || all (U.null . svrRawSamples) xs
 
-    clock = svrClock (head xs)
+    record = T.intercalate "," (time : fields) `T.append` "\r\n"
+    time   = T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc)
+    fields = offsets ++ delays
 
-    fields = offsets ++ delays ++ [origin, freq]
+    clock   = svrClock (head xs)
+    samples = map ((U.!? 0) . svrRawSamples) xs
+    offsets = map (maybe "" $ showMilli . toSeconds . offset clock) samples
+    delays  = map (maybe "" $ showMilli . fromDiff clock . roundtrip) samples
 
-    freq   = (toShortest . clockFrequency) clock
-    origin = (T.pack . show . clockIndex0) clock
-
-    empty   = null xs || any (U.null . svrRawSamples) xs
-    samples = map (U.head . svrRawSamples) xs
-    offsets = map (showMilli . toSeconds . offset clock) samples
-    delays  = map (showMilli . fromDiff clock . roundtrip) samples
+csvHeaders :: [Server] -> Maybe T.Text
+csvHeaders [] = Nothing
+csvHeaders xs = Just $ T.intercalate "," headers `T.append` "\r\n"
+  where
+    names   = map (T.pack . svrHostName) xs
+    headers = ["UTC Time"]
+           ++ map (\x -> T.concat [x, " vs UTC (ms)"]) names
+           ++ map (\x -> T.concat ["Network Delay to ", x, " (ms)"]) names
 
 showMilli :: Seconds -> T.Text
 showMilli t = toFixed 4 ms

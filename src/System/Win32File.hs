@@ -1,9 +1,9 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module System.Win32File (
-      FileLogger
-    , newDailyLogger
-    , appendText
+      RecordLogger
+    , newRecordLogger
+    , writeRecord
     ) where
 
 import           Control.Monad (void)
@@ -13,37 +13,82 @@ import           Data.ByteString.Internal (ByteString(..))
 import           Data.IORef
 import qualified Data.Text as T
 import           Data.Text.Encoding (encodeUtf8)
-import           Data.Time (UTCTime(..))
-import           Data.Time.Calendar (Day(..), showGregorian)
+import           Data.Time
 import           Foreign.ForeignPtr (withForeignPtr)
 import           Foreign.Ptr (plusPtr)
+import           System.Directory (doesFileExist)
 import           System.FilePath ((</>), (<.>))
 import           System.Win32.File
 import           System.Win32.Types
 
 ------------------------------------------------------------------------
 
-data FileLogger = FileLogger {
-      fileDir :: FilePath
-    , fileRef :: IORef (Day, HANDLE)
+type Headers = T.Text
+type Record  = T.Text
+
+data RecordLogger = RecordLogger {
+      logDir      :: FilePath
+    , logFile     :: IORef File
+    , logInterval :: NominalDiffTime
     }
 
-newDailyLogger :: FilePath -> IO FileLogger
-newDailyLogger fileDir = do
-    fileRef <- newIORef (ModifiedJulianDay 0, nullHANDLE)
-    return FileLogger{..}
+data File = File {
+      fileHandle  :: HANDLE
+    , fileTime    :: UTCTime -- time of the last record
+    , fileHeaders :: Headers
+    }
 
-appendText :: FileLogger -> UTCTime -> T.Text -> IO ()
-appendText FileLogger{..} (UTCTime day' _) text = do
-    (_, h) <- modifyIORef' fileRef update
-    writeBS h (encodeUtf8 text)
+newRecordLogger :: FilePath -> IO RecordLogger
+newRecordLogger logDir = do
+    logFile <- newIORef (File nullHANDLE utc0 T.empty)
+    return RecordLogger{..}
   where
-    update (day, h)
-        | day == day' = return (day, h)
-        | otherwise   = do
-            tryCloseHandle h
-            h' <- openOrCreateFile (fileDir </> showGregorian day' <.> "csv")
-            return (day', h')
+    logInterval = 10
+    utc0 = UTCTime (ModifiedJulianDay 0) (secondsToDiffTime 0)
+
+writeRecord :: RecordLogger -> UTCTime -> Headers -> Record -> IO ()
+writeRecord RecordLogger{..} time headers record = do
+    mfile <- modifyIORef' logFile updateFile
+    case mfile of
+        Just f  -> writeUtf8 (fileHandle f) record
+        Nothing -> return ()
+  where
+    updateFile file@File{..} =
+      case (timeOk, nameOk) of
+        (False, _)    -> deny file
+        (True, True)  -> allow file { fileTime = time }
+        (True, False) -> do
+            tryCloseHandle fileHandle
+            path      <- nextFilePath (logDir </> fileName) "csv"
+            newHandle <- openOrCreateFile path
+            writeUtf8 newHandle headers
+            allow (File newHandle time headers)
+      where
+        nameOk   = time `dayEq` fileTime && headers == fileHeaders
+        timeOk   = time >= logInterval `addUTCTime` fileTime
+        fileName = showGregorian (utctDay time)
+
+        allow f = return (f, Just f)
+        deny  f = return (f, Nothing)
+
+dayEq :: UTCTime -> UTCTime -> Bool
+dayEq (UTCTime d1 _) (UTCTime d2 _) = d1 == d2
+
+nextFilePath :: FilePath -> String -> IO FilePath
+nextFilePath base ext = go (0 :: Int)
+  where
+    go n = do
+        let path = base ++ suffix n <.> ext
+        exists <- doesFileExist path
+        if exists then go (n+1)
+                  else return path
+
+    suffix 0 = ""
+    suffix n = "_" ++ show n
+
+
+writeUtf8 :: HANDLE -> T.Text -> IO ()
+writeUtf8 h t = writeBS h (encodeUtf8 t)
 
 writeBS :: HANDLE -> B.ByteString -> IO ()
 writeBS _ (PS _  _ 0) = return ()
@@ -54,9 +99,8 @@ writeBS h (PS ps s n) = withForeignPtr ps write
 
 openOrCreateFile :: FilePath -> IO HANDLE
 openOrCreateFile path = do
-    h <- createFile path fILE_APPEND_DATA (fILE_SHARE_READ .|. fILE_SHARE_DELETE)
-                    Nothing oPEN_ALWAYS fILE_ATTRIBUTE_NORMAL Nothing
-
+    h   <- createFile path fILE_APPEND_DATA (fILE_SHARE_READ .|. fILE_SHARE_DELETE)
+                      Nothing oPEN_ALWAYS fILE_ATTRIBUTE_NORMAL Nothing
     err <- getLastError
     if err /= 0 && err /= 183
        then failWith "openOrCreateFile" err
@@ -75,9 +119,9 @@ fILE_APPEND_DATA = 4
 fILE_SHARE_DELETE :: ShareMode
 fILE_SHARE_DELETE = 4
 
-modifyIORef' :: IORef a -> (a -> IO a) -> IO a
+modifyIORef' :: IORef a -> (a -> IO (a, b)) -> IO b
 modifyIORef' ref io = do
     x  <- readIORef ref
-    x' <- io x
+    (x',r) <- io x
     writeIORef ref x'
-    return x'
+    return r
