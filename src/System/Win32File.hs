@@ -44,7 +44,9 @@ newRecordLogger logDir = do
     return RecordLogger{..}
   where
     logInterval = 10
-    utc0 = UTCTime (ModifiedJulianDay 0) (secondsToDiffTime 0)
+
+utc0 :: UTCTime
+utc0 = UTCTime (ModifiedJulianDay 0) (secondsToDiffTime 0)
 
 writeRecord :: RecordLogger -> UTCTime -> Headers -> Record -> IO ()
 writeRecord RecordLogger{..} time headers record = do
@@ -56,17 +58,23 @@ writeRecord RecordLogger{..} time headers record = do
     updateFile file@File{..} =
       case (timeOk, nameOk) of
         (False, _)    -> deny file
-        (True, True)  -> allow file { fileTime = time }
+        (True, True)  -> allow file { fileTime = fileTime' }
         (True, False) -> do
             tryCloseHandle fileHandle
-            path      <- nextFilePath (logDir </> fileName) "csv"
+            path      <- nextFilePath (logDir </> fileName') "csv"
             newHandle <- openOrCreateFile path
             writeUtf8 newHandle headers
-            allow (File newHandle time headers)
+            allow (File newHandle fileTime' headers)
       where
-        nameOk   = time `dayEq` fileTime && headers == fileHeaders
-        timeOk   = time >= logInterval `addUTCTime` fileTime
-        fileName = showGregorian (utctDay time)
+        nameOk = time `dayEq` fileTime && headers == fileHeaders
+        timeOk = fileTime /= fileTime'
+
+        fileName' = showGregorian (utctDay time)
+        fileTime' = time { utctDayTime = dayTime' }
+
+        dayTime'  = fromIntegral intervals * interval
+        intervals = floor (utctDayTime time / interval) :: Int
+        interval  = realToFrac logInterval
 
         allow f = return (f, Just f)
         deny  f = return (f, Nothing)
