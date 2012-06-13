@@ -64,7 +64,6 @@ executable ntpmon
     , blaze-builder      == 0.3.*
     , bytestring         == 0.9.*
     , conduit            == 0.4.*
-    , double-conversion  == 0.2.*
     , http-types         == 0.6.*
     , mtl                == 2.0.*
     , network            == 2.3.*
