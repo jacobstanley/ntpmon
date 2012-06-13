@@ -23,7 +23,6 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
 import           Data.Conduit.Attoparsec (sinkParser)
-import           Data.Double.Conversion.Text (toFixed)
 import           Data.Function (on)
 import           Data.List (find)
 import           Data.Maybe (catMaybes)
@@ -44,6 +43,7 @@ import           Network.Wai.Application.Static hiding (FilePath)
 import           Network.Wai.Handler.Warp
 import           System.Locale (defaultTimeLocale)
 import           System.IO
+import           Text.Printf (printf)
 
 import           Network.NTP
 import           Network.NTP.Config
@@ -74,7 +74,7 @@ initState = do
 
 updateConfig :: ServiceState -> [ServerConfig] -> IO ()
 updateConfig state cfg = do
-    let hosts = map cfgHostName cfg ++ ["localhost"]
+    let hosts = ["localhost"] ++ map cfgHostName cfg
         clock = svcClock0 state
     servers <- catMaybes <$> mapM (resolveServer clock . T.unpack) hosts
     atomically $ do
@@ -98,6 +98,17 @@ findByName :: [Server] -> Server -> Server
 findByName ys x = maybe x id (find (nameEq x) ys)
   where
     nameEq = (==) `on` svrHostName
+
+type Master = Server
+
+-- Finds the server which is the reference server for localhost.
+-- NOTE: Assumes that the first server in the list is localhost.
+findMaster :: [Server] -> Master
+findMaster []         = error "findMaster: empty server list"
+findMaster [local]    = local
+findMaster (local:xs) = maybe local id (find isMaster xs)
+  where
+    isMaster svr = svrRefAddr local == svrAddr svr
 
 ------------------------------------------------------------------------
 -- Running as a service
@@ -173,27 +184,28 @@ instance FromJSON ServerMode where
 getData :: Int -> ServiceState -> ResourceT IO Response
 getData n state = do
     body <- atomically $ do
-        servers@(ref:_) <- readTVar (svcServers state)
-        let clock = svrClock ref
-        return (takeData n servers clock)
+        servers <- readTVar (svcServers state)
+        return $ takeData n servers (findMaster servers)
 
     return (responseJSON status200 [] body)
 
-takeData :: Int -> [Server] -> Clock -> Value
-takeData n xs clock = toJSON $ map (takeServerData n clock) xs
+takeData :: Int -> [Server] -> Master -> Value
+takeData n xs master = toJSON $ map (takeServerData n master) xs
 
-takeServerData :: Int -> Clock -> Server -> Value
-takeServerData n clock svr = object [
-      "name"    .= svrName svr
-    , "stratum" .= svrStratum svr
-    , "refid"   .= B.unpack (svrReferenceId svr)
-    , "times"   .= toJSON utcTimes
-    , "offsets" .= toJSON offsets
-    , "delays"  .= toJSON delays
+takeServerData :: Int -> Master -> Server -> Value
+takeServerData n master svr = object [
+      "name"     .= svrName svr
+    , "isMaster" .= toJSON (svrSockAddr svr == svrSockAddr master)
+    , "stratum"  .= svrStratum svr
+    , "refid"    .= B.unpack (svrRefId svr)
+    , "times"    .= toJSON utcTimes
+    , "offsets"  .= toJSON offsets
+    , "delays"   .= toJSON delays
     ]
   where
     samples = U.take n (svrRawSamples svr)
 
+    clock    = svrClock master
     offsets  = U.map (toSeconds . offset clock) samples :: U.Vector Double
     delays   = U.map (toSeconds . networkDelay clock) samples :: U.Vector Double
 
@@ -280,24 +292,25 @@ sampleInterval = realToFrac (1 / samplesPerSecond)
 -- CSV Logging
 
 writeCSV :: RecordLogger -> [Server] -> IO ()
-writeCSV _    []       = return ()
-writeCSV file xs@(x:_) = do
-    utc <- toUTCTime <$> getCurrentTime (svrClock x)
-    case (csvHeaders xs, csvRecord utc xs) of
+writeCSV _    [] = return ()
+writeCSV file xs = do
+    utc <- toUTCTime <$> getCurrentTime clock
+    case (csvHeaders xs, csvRecord clock utc xs) of
         (Just hdr, Just rec) -> writeRecord file utc hdr rec
         _                    -> return ()
-
-csvRecord :: UTCTime -> [Server] -> Maybe T.Text
-csvRecord utc xs | empty     = Nothing
-                 | otherwise = Just record
   where
-    empty = null xs || all (U.null . svrRawSamples) xs
+    clock = svrClock (findMaster xs)
+
+csvRecord :: Clock -> UTCTime -> [Server] -> Maybe T.Text
+csvRecord clock utc xs | empty     = Nothing
+                       | otherwise = Just record
+  where
+    empty = all (U.null . svrRawSamples) xs
 
     record = T.intercalate "," (time : fields) `T.append` "\r\n"
     time   = T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc)
     fields = offsets ++ delays
 
-    clock   = svrClock (head xs)
     samples = map ((U.!? 0) . svrRawSamples) xs
     offsets = map (maybe "" $ showMilli . toSeconds . offset clock) samples
     delays  = map (maybe "" $ showMilli . fromDiff clock . roundtrip) samples
@@ -312,7 +325,7 @@ csvHeaders xs = Just $ T.intercalate "," headers `T.append` "\r\n"
            ++ map (\x -> T.concat ["Network Delay to ", x, " (ms)"]) names
 
 showMilli :: Seconds -> T.Text
-showMilli t = toFixed 4 ms
+showMilli t = T.pack (printf "%.4f" ms)
   where
     ms = (1000 :: Double) * (realToFrac t)
 

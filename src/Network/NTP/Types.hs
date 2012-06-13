@@ -10,14 +10,14 @@ module Network.NTP.Types (
     , Version (..)
     , Mode (..)
     , Stratum
-    , ReferenceId
+    , RefId
     , Packet (..)
     , Time (..)
     , Duration (..)
 
     -- * 'Packet' functions
     , requestMsg
-    , decodeReferenceId
+    , decodeRefId
 
     -- * 'Time' functions
     , add
@@ -156,7 +156,7 @@ type Stratum = Word8
 -- when using the IPv6 address family on an NTPv4 server with a NTPv3
 -- client, the Reference Identifier field appears to be a random value
 -- and a timing loop might not be detected.
-type ReferenceId = Word32
+type RefId = Word32
 
 -- | An NTP data packet.
 data Packet = Packet {
@@ -202,11 +202,11 @@ data Packet = Packet {
     -- hundred milliseconds.
     , ntpRootDispersion :: !Word32
 
-    -- | See 'ReferenceId' for details.
-    , ntpReferenceId :: !ReferenceId
+    -- | See 'RefId' for details.
+    , ntpRefId :: !RefId
 
     -- | The time at which the local clock was last set or corrected.
-    , ntpReferenceTime :: !Time
+    , ntpRefTime :: !Time
 
     -- | /Originate Time/ The time at which the request departed the client for
     -- the server.
@@ -237,8 +237,8 @@ requestMsg t3 = empty { ntpT3 = t3 }
 ------------------------------------------------------------------------
 -- Reference ID
 
-decodeReferenceId :: Packet -> B.ByteString
-decodeReferenceId Packet{..} =
+decodeRefId :: Packet -> B.ByteString
+decodeRefId Packet{..} =
     case ntpStratum of
         0 -> ascii
         1 -> ascii
@@ -248,10 +248,10 @@ decodeReferenceId Packet{..} =
     ipv4  = C.pack $ intercalate "." $ map show parts
     parts = [a,b,c,d]
 
-    a = fromIntegral (ntpReferenceId `shiftR` 24) :: Word8
-    b = fromIntegral (ntpReferenceId `shiftR` 16) :: Word8
-    c = fromIntegral (ntpReferenceId `shiftR` 8) :: Word8
-    d = fromIntegral ntpReferenceId :: Word8
+    a = fromIntegral (ntpRefId `shiftR` 24) :: Word8
+    b = fromIntegral (ntpRefId `shiftR` 16) :: Word8
+    c = fromIntegral (ntpRefId `shiftR` 8) :: Word8
+    d = fromIntegral ntpRefId :: Word8
 
 ------------------------------------------------------------------------
 -- Time Types
@@ -371,8 +371,8 @@ instance Serialize Packet where
         putWord8    ntpPrecision
         putWord32be ntpRootDelay
         putWord32be ntpRootDispersion
-        putWord32be ntpReferenceId
-        put         ntpReferenceTime
+        putWord32be ntpRefId
+        put         ntpRefTime
         put         ntpT1
         put         ntpT2
         put         ntpT3
@@ -383,8 +383,8 @@ instance Serialize Packet where
         ntpPrecision      <- getWord8
         ntpRootDelay      <- getWord32be
         ntpRootDispersion <- getWord32be
-        ntpReferenceId    <- getWord32be
-        ntpReferenceTime  <- get
+        ntpRefId          <- getWord32be
+        ntpRefTime        <- get
         ntpT1             <- get
         ntpT2             <- get
         ntpT3             <- get

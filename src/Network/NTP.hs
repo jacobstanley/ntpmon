@@ -19,6 +19,7 @@ import           Control.Monad.IO.Class
 import           Control.Monad.Loops (unfoldM)
 import           Control.Monad.STM (atomically)
 import           Control.Monad.State
+import           Data.Bits (shiftR, shiftL, (.|.), (.&.))
 import qualified Data.ByteString as B
 import           Data.IORef
 import           Data.Int (Int64)
@@ -28,7 +29,7 @@ import qualified Data.Time.Clock as T
 import qualified Data.Vector.Generic as Generic
 import qualified Data.Vector.Generic.Mutable as MGeneric
 import qualified Data.Vector.Unboxed as U
-import           Data.Word (Word64)
+import           Data.Word (Word32, Word64)
 import           Network.Socket hiding (send, sendTo, recv, recvFrom)
 import           Network.Socket.ByteString
 import qualified Statistics.Function as S
@@ -176,12 +177,13 @@ setFrequency freq c = c { clockFrequency = freq }
 
 data Server = Server {
       svrHostName     :: HostName
-    , svrAddress      :: SockAddr
+    , svrSockAddr     :: SockAddr
     , svrRawSamples   :: U.Vector Sample
     , svrMinRoundtrip :: ClockDiff
     , svrBaseError    :: ClockDiff
     , svrStratum      :: Int
-    , svrReferenceId  :: B.ByteString
+    , svrRefId        :: B.ByteString
+    , svrRefAddr      :: HostAddress
     , svrClock        :: Clock
     }
 
@@ -190,7 +192,12 @@ svrName svr | host /= addr = host ++ " (" ++ addr ++ ")"
             | otherwise    = host
   where
     host = svrHostName svr
-    addr = (takeWhile (/= ':') . show . svrAddress) svr
+    addr = (takeWhile (/= ':') . show . svrSockAddr) svr
+
+svrAddr :: Server -> HostAddress
+svrAddr Server{..} = case svrSockAddr of
+    (SockAddrInet _ addr) -> addr
+    _                     -> error "svrAddr: unexpected non-IPv4 address"
 
 -- | Resolves a list of IP addresses registered for the specified
 -- hostname and creates 'Server' instances for each of them.
@@ -198,7 +205,7 @@ resolveServer :: Clock -> HostName -> IO (Maybe Server)
 resolveServer clock host = ioErrorToNothing $
     listToMaybe . map (mkServer . addrAddress) <$> getHostAddrInfo
   where
-    mkServer addr = Server host addr U.empty 0 0 0 B.empty clock
+    mkServer addr = Server host addr U.empty 0 0 0 B.empty 0 clock
 
     getHostAddrInfo = getAddrInfo hints (Just host) (Just "ntp")
 
@@ -213,7 +220,7 @@ transmit Server{..} = do
     liftIO $ do
         now <- fromIntegral <$> getCurrentIndex
         let msg = (encode . requestMsg . Time) now
-        sendAllTo ntpSocket msg svrAddress
+        sendAllTo ntpSocket msg svrSockAddr
 
 receive :: Socket -> IO (Either String AddrPacket)
 receive sock = handleIOErrors $ do
@@ -236,8 +243,8 @@ updateServers svrs = do
     update = fconcat . map go
       where
         go (AddrPacket t addr pkt) (svr, up)
-          | addr == svrAddress svr = (updateServer svr t pkt, True)
-          | otherwise              = (svr, up)
+          | addr == svrSockAddr svr = (updateServer svr t pkt, True)
+          | otherwise               = (svr, up)
 
     fconcat :: [a -> a] -> a -> a
     fconcat = foldl (.) id
@@ -254,7 +261,8 @@ updateServer svr t4 p@Packet{..} =
     , svrMinRoundtrip = round minRoundtrip
     , svrBaseError    = round (3 * stdDevRoundtrip)
     , svrStratum      = fromIntegral ntpStratum
-    , svrReferenceId  = decodeReferenceId p
+    , svrRefId        = decodeRefId p
+    , svrRefAddr      = byteSwap32 ntpRefId
     }
   where
     newSample = (fromIntegral (unTime ntpT1), ntpT2, ntpT3, t4)
@@ -273,6 +281,13 @@ updateServer svr t4 p@Packet{..} =
     bestRoundtrips = (U.take half . S.partialSort half) roundtrips
     half           = (U.length roundtrips + 1) `div` 2
 
+byteSwap32 :: Word32 -> Word32
+byteSwap32 n = a .|. b .|. c .|. d
+  where
+    a = n `shiftR` 24
+    b = (n `shiftL` 8) .&. 0x00ff0000
+    c = (n `shiftR` 8) .&. 0x0000ff00
+    d = n `shiftL` 24
 
 maxSamples :: Int
 maxSamples = max phaseSamples freqSamples
