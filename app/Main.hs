@@ -1,12 +1,14 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
 
 module Main (main) where
 
@@ -17,8 +19,11 @@ import qualified Control.Concurrent.STM as STM
 import           Control.Concurrent.STM hiding (atomically, readTVarIO)
 import           Control.Monad (when, mzero)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
+import           Control.DeepSeq (NFData(..), force)
+import           Control.DeepSeq.TH (deriveNFDatas)
 import           Data.Aeson
 import           Data.Aeson.Encode
+import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
@@ -37,6 +42,7 @@ import           Data.Time.Format (formatTime)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
 import           Network (withSocketsDo)
+import           Network.Socket (SockAddr(..), PortNumber(..))
 import           Network.HTTP.Types
 import           Network.Wai
 import           Network.Wai.Application.Static hiding (FilePath)
@@ -79,16 +85,16 @@ updateConfig state cfg = do
     servers <- catMaybes <$> mapM (resolveServer clock . T.unpack) hosts
     atomically $ do
         writeTVar (svcConfig state) cfg
-        modifyTVar' (svcServers state) (mergeServers servers)
+        modifyTVar' (svcServers state) (force . mergeServers servers)
 
 updateData :: ServiceState -> [Server] -> STM ()
 updateData state servers =
-    modifyTVar' (svcServers state) (flip mergeServers servers)
+    modifyTVar' (svcServers state) (force . flip mergeServers servers)
 
 -- | Returns the server addresses from the first list combined with
 -- the server data from the second list.
 mergeServers :: [Server] -> [Server] -> [Server]
-mergeServers xs ys = length zs `seq` zs
+mergeServers xs ys = zs
   where
     zs = map (findByName ys) xs
 
@@ -344,3 +350,14 @@ atomically = liftIO . STM.atomically
 -- | 'STM.readTVarIO' lifted in to 'MonadIO'
 readTVarIO :: MonadIO m => TVar a -> m a
 readTVarIO = liftIO . STM.readTVarIO
+
+------------------------------------------------------------------------
+-- NFData Instances
+
+deriving instance NFData Time
+deriving instance NFData PortNumber
+
+instance NFData ByteString
+instance U.Unbox a => NFData (U.Vector a)
+
+$(deriveNFDatas [''SockAddr, ''Clock, ''Server])

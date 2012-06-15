@@ -269,8 +269,7 @@ updateServer svr t4 p@Packet{..} =
 
     -- force the evaluation of the last sample in the list
     -- to avoid building up lots of unevaluated thunks
-    samples = let xs = U.take maxSamples (newSample `U.cons` svrRawSamples svr)
-              in U.last xs `seq` xs
+    samples = U.take maxSamples (newSample `U.cons` svrRawSamples svr)
 
     minRoundtrip    = U.head bestRoundtrips
     stdDevRoundtrip = S.stdDev bestRoundtrips
