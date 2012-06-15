@@ -295,34 +295,39 @@ writeCSV :: RecordLogger -> [Server] -> IO ()
 writeCSV _    [] = return ()
 writeCSV file xs = do
     utc <- toUTCTime <$> getCurrentTime clock
-    case (csvHeaders xs, csvRecord clock utc xs) of
+    case (csvHeaders xs, csvRecord utc master xs) of
         (Just hdr, Just rec) -> writeRecord file utc hdr rec
         _                    -> return ()
   where
-    clock = svrClock (findMaster xs)
+    master = findMaster xs
+    clock  = svrClock master
 
-csvRecord :: Clock -> UTCTime -> [Server] -> Maybe T.Text
-csvRecord clock utc xs | empty     = Nothing
-                       | otherwise = Just record
+csvRecord :: UTCTime -> Master -> [Server] -> Maybe T.Text
+csvRecord utc master xs | empty     = Nothing
+                        | otherwise = Just record
   where
     empty = all (U.null . svrRawSamples) xs
 
-    record = T.intercalate "," (time : fields) `T.append` "\r\n"
-    time   = T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc)
-    fields = offsets ++ delays
+    record = T.intercalate "," fields `T.append` "\r\n"
+    fields = [time] ++ offsets ++ delays ++ [masterName]
+
+    time       = T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc)
+    masterName = T.pack (svrName master)
 
     samples = map ((U.!? 0) . svrRawSamples) xs
     offsets = map (maybe "" $ showMilli . toSeconds . offset clock) samples
     delays  = map (maybe "" $ showMilli . fromDiff clock . roundtrip) samples
+    clock   = svrClock master
 
 csvHeaders :: [Server] -> Maybe T.Text
 csvHeaders [] = Nothing
 csvHeaders xs = Just $ T.intercalate "," headers `T.append` "\r\n"
   where
-    names   = map (T.pack . svrHostName) xs
+    names   = map (T.pack . svrName) xs
     headers = ["UTC Time"]
            ++ map (\x -> T.concat [x, " vs UTC (ms)"]) names
            ++ map (\x -> T.concat ["Network Delay to ", x, " (ms)"]) names
+           ++ ["Master"]
 
 showMilli :: Seconds -> T.Text
 showMilli t = T.pack (printf "%.4f" ms)
