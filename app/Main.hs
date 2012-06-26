@@ -13,7 +13,7 @@
 module Main (main) where
 
 import           Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
-import           Control.Applicative ((<$>), (<*>))
+import           Control.Applicative ((<$>), (<*>), (<|>))
 import           Control.Concurrent (forkIO, threadDelay)
 import qualified Control.Concurrent.STM as STM
 import           Control.Concurrent.STM hiding (atomically, readTVarIO)
@@ -80,12 +80,16 @@ initState = do
 
 updateConfig :: ServiceState -> [ServerConfig] -> IO ()
 updateConfig state cfg = do
-    let hosts = ["localhost"] ++ map cfgHostName cfg
-        clock = svcClock0 state
     servers <- catMaybes <$> mapM (resolveServer clock . T.unpack) hosts
     atomically $ do
         writeTVar (svcConfig state) cfg
         modifyTVar' (svcServers state) (force . mergeServers servers)
+  where
+    hosts = ["localhost"] ++ catMaybes (map hostName cfg)
+    clock = svcClock0 state
+
+    hostName (ServerConfig _ (UDP x)) = Just x
+    hostName _                        = Nothing
 
 updateData :: ServiceState -> [Server] -> STM ()
 updateData state servers =
@@ -163,22 +167,58 @@ putServers req state = do
 
 instance ToJSON ServerConfig where
   toJSON s = object [
-        "hostName" .= cfgHostName s
-      , "mode"     .= cfgMode s
+        "priority" .= cfgPriority s
+      , "driver"   .= cfgDriver s
       ]
 
 instance FromJSON ServerConfig where
   parseJSON (Object x) = ServerConfig
-      <$> x .: "hostName"
-      <*> x .: "mode"
+      <$> x .: "priority"
+      <*> x .: "driver"
   parseJSON _          = mzero
 
-instance ToJSON ServerMode where
+instance FromJSON Driver where
+  parseJSON (Object x) =
+    UDP <$> x .: "hostName"
+    <|>
+    NMEA <$> x .: "serialPort"
+         <*> x .: "baudRate"
+         <*> x .: "timeOffset"
+  parseJSON _          = mzero
+
+instance ToJSON Driver where
+  toJSON (UDP hostName) = object [
+      "hostName" .= hostName
+    ]
+  toJSON (NMEA port baud off) = object [
+      "serialPort" .= port
+    , "baudRate"   .= baud
+    , "timeOffset" .= off
+    ]
+
+instance ToJSON BaudRate where
+  toJSON B'4800   = Number 4800
+  toJSON B'9600   = Number 9600
+  toJSON B'19200  = Number 19200
+  toJSON B'38400  = Number 38400
+  toJSON B'57600  = Number 57600
+  toJSON B'115200 = Number 115200
+
+instance FromJSON BaudRate where
+  parseJSON (Number 4800)   = return B'4800
+  parseJSON (Number 9600)   = return B'9600
+  parseJSON (Number 19200)  = return B'19200
+  parseJSON (Number 38400)  = return B'38400
+  parseJSON (Number 57600)  = return B'57600
+  parseJSON (Number 115200) = return B'115200
+  parseJSON _               = mzero
+
+instance ToJSON Priority where
   toJSON Prefer   = String "prefer"
   toJSON Normal   = String "normal"
   toJSON NoSelect = String "noSelect"
 
-instance FromJSON ServerMode where
+instance FromJSON Priority where
   parseJSON (String "prefer")   = return Prefer
   parseJSON (String "normal")   = return Normal
   parseJSON (String "noSelect") = return NoSelect
