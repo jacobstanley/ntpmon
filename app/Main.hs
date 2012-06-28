@@ -29,6 +29,7 @@ import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
 import           Data.Conduit.Attoparsec (sinkParser)
 import           Data.Function (on)
+import qualified Data.HashMap.Strict as HM
 import           Data.List (find)
 import           Data.Maybe (catMaybes)
 import qualified Data.Text as T
@@ -166,35 +167,36 @@ putServers req state = do
             fromStatus status200
 
 instance ToJSON ServerConfig where
-  toJSON s = object [
-        "priority" .= cfgPriority s
-      , "driver"   .= cfgDriver s
-      ]
+  toJSON s = unionObject std drv
+    where
+      std = object ["priority" .= cfgPriority s]
+      drv = toJSON (cfgDriver s)
+
+unionObject :: Value -> Value -> Value
+unionObject (Object x) (Object y) = Object (HM.union x y)
+unionObject x _ = x
 
 instance FromJSON ServerConfig where
-  parseJSON (Object x) = ServerConfig
-      <$> x .: "priority"
-      <*> x .: "driver"
-  parseJSON _          = mzero
-
-instance FromJSON Driver where
-  parseJSON (Object x) =
-    UDP <$> x .: "hostName"
-    <|>
-    NMEA <$> x .: "serialPort"
-         <*> x .: "baudRate"
-         <*> x .: "timeOffset"
-  parseJSON _          = mzero
+  parseJSON o@(Object x) = ServerConfig <$> x .: "priority"
+                                        <*> parseJSON o
+  parseJSON _            = mzero
 
 instance ToJSON Driver where
   toJSON (UDP hostName) = object [
-      "hostName" .= hostName
-    ]
+        "hostName" .= hostName
+      ]
   toJSON (NMEA port baud off) = object [
-      "serialPort" .= port
-    , "baudRate"   .= baud
-    , "timeOffset" .= off
-    ]
+        "serialPort" .= port
+      , "baudRate"   .= baud
+      , "timeOffset" .= off
+      ]
+
+instance FromJSON Driver where
+  parseJSON (Object x) = UDP  <$> x .: "hostName"
+                     <|> NMEA <$> x .: "serialPort"
+                              <*> x .: "baudRate"
+                              <*> x .: "timeOffset"
+  parseJSON _ = mzero
 
 instance ToJSON BaudRate where
   toJSON B'4800   = Number 4800
