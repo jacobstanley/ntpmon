@@ -23,6 +23,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Read as T
 import           Prelude hiding (lines)
+import           Text.Printf (printf)
 
 ------------------------------------------------------------------------
 -- Types
@@ -157,7 +158,7 @@ writeConfig servers path = do
             [ "fudge  "
             , driverHost cfgDriver
             , " flag1 1"
-            , " time2 ", tshow offset
+            , " time2 ", showMicro offset
             ]
 
 driverHost :: Driver -> HostName
@@ -170,6 +171,12 @@ driverMode (NMEA _ baud _ ) = " mode " `T.append` (tshow . encodeBaud) baud
 
 tshow :: Show a => a -> T.Text
 tshow = T.pack . show
+
+showMicro :: Double -> T.Text
+showMicro x | T.last txt /= '.' = txt
+            | otherwise         = txt `T.append` "0"
+  where
+    txt = T.dropWhileEnd (== '0') $ T.pack (printf "%.6f" x)
 
 ------------------------------------------------------------------------
 -- Utils
