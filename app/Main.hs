@@ -32,7 +32,7 @@ import           Data.Conduit (ResourceT, ($$))
 import           Data.Conduit.Attoparsec (sinkParser)
 import           Data.Function (on)
 import qualified Data.HashMap.Strict as HM
-import           Data.List (find)
+import           Data.List (find, nubBy)
 import           Data.Maybe (catMaybes)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as LT
@@ -101,16 +101,15 @@ updateData state servers =
 -- | Returns the server addresses from the first list combined with
 -- the server data from the second list.
 mergeServers :: [Server] -> [Server] -> [Server]
-mergeServers xs ys = zs
-  where
-    zs = map (findByName ys) xs
+mergeServers xs ys = nubBy nameEq (map (findByName ys) xs)
 
 -- Finds the server which has a matching address, or if not, simply
 -- returns the server used as the search candidate.
 findByName :: [Server] -> Server -> Server
 findByName ys x = maybe x id (find (nameEq x) ys)
-  where
-    nameEq = (==) `on` svrHostName
+
+nameEq :: Server -> Server -> Bool
+nameEq = (==) `on` svrHostName
 
 type Master = Server
 
