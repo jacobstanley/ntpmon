@@ -7,22 +7,24 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
 
 module Main (main) where
 
 import           Blaze.ByteString.Builder.Char.Utf8 (fromLazyText)
-import           Control.Applicative ((<$>), (<*>), (<|>))
+import           Control.Applicative ((<$>), (<*>))
 import           Control.Concurrent (forkIO, threadDelay)
 import qualified Control.Concurrent.STM as STM
 import           Control.Concurrent.STM hiding (atomically, readTVarIO)
-import           Control.Monad (when, mzero)
-import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Control.DeepSeq (NFData(..), force)
 import           Control.DeepSeq.TH (deriveNFDatas)
+import           Control.Monad (when)
+import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Data.Aeson
 import           Data.Aeson.Encode
+import           Data.Aeson.Types (typeMismatch)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
@@ -43,13 +45,13 @@ import           Data.Time.Format (formatTime)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
 import           Network (withSocketsDo)
-import           Network.Socket (SockAddr(..), PortNumber(..))
 import           Network.HTTP.Types
+import           Network.Socket (SockAddr(..), PortNumber(..))
 import           Network.Wai
 import           Network.Wai.Application.Static hiding (FilePath)
 import           Network.Wai.Handler.Warp
-import           System.Locale (defaultTimeLocale)
 import           System.IO
+import           System.Locale (defaultTimeLocale)
 import           Text.Printf (printf)
 
 import           Network.NTP
@@ -159,7 +161,7 @@ putServers req state = do
     value <- requestBody req $$ sinkParser json
     let result = fromJSON value :: Result [ServerConfig]
     case result of
-        Error _     -> fromStatus status400
+        Error msg   -> fromStatus' status400 (LT.pack msg)
         Success cfg -> do
             liftIO $ do
                 writeConfig cfg =<< findConfig
@@ -167,36 +169,55 @@ putServers req state = do
             fromStatus status200
 
 instance ToJSON ServerConfig where
-  toJSON s = unionObject std drv
-    where
-      std = object ["priority" .= cfgPriority s]
-      drv = toJSON (cfgDriver s)
-
-unionObject :: Value -> Value -> Value
-unionObject (Object x) (Object y) = Object (HM.union x y)
-unionObject x _ = x
+  toJSON s = object [
+        "priority" .= cfgPriority s
+      , "driver"   .= cfgDriver s
+      ]
 
 instance FromJSON ServerConfig where
-  parseJSON o@(Object x) = ServerConfig <$> x .: "priority"
-                                        <*> parseJSON o
-  parseJSON _            = mzero
+  parseJSON (Object x) = ServerConfig <$> x .: "priority"
+                                      <*> x .: "driver"
+  parseJSON v = typeMismatch "ServerConfig" v
+
+instance ToJSON Priority where
+  toJSON Prefer   = String "prefer"
+  toJSON Normal   = String "normal"
+  toJSON NoSelect = String "noSelect"
+
+instance FromJSON Priority where
+  parseJSON (String "prefer")   = return Prefer
+  parseJSON (String "normal")   = return Normal
+  parseJSON (String "noSelect") = return NoSelect
+  parseJSON v = typeMismatch "Priority" v
 
 instance ToJSON Driver where
   toJSON (UDP hostName) = object [
+      "udp" .= object [
         "hostName" .= hostName
-      ]
+      ]]
   toJSON (NMEA port baud off) = object [
+      "nmea" .= object [
         "serialPort" .= port
       , "baudRate"   .= baud
       , "timeOffset" .= off
-      ]
+      ]]
+  toJSON (SharedMem seg refid off) = object [
+      "sharedMem" .= object [
+        "segment"    .= seg
+      , "refId"      .= refid
+      , "timeOffset" .= off
+      ]]
 
 instance FromJSON Driver where
-  parseJSON (Object x) = UDP  <$> x .: "hostName"
-                     <|> NMEA <$> x .: "serialPort"
-                              <*> x .: "baudRate"
-                              <*> x .: "timeOffset"
-  parseJSON _ = mzero
+  parseJSON (Object (HM.toList -> [(key, (Object x))]))
+    | key == "udp"       = UDP       <$> x .: "hostName"
+    | key == "nmea"      = NMEA      <$> x .: "serialPort"
+                                     <*> x .: "baudRate"
+                                     <*> x .: "timeOffset"
+    | key == "sharedMem" = SharedMem <$> x .: "segment"
+                                     <*> x .: "refId"
+                                     <*> x .: "timeOffset"
+  parseJSON v = typeMismatch "Driver" v
 
 instance ToJSON BaudRate where
   toJSON B'4800   = Number 4800
@@ -213,18 +234,30 @@ instance FromJSON BaudRate where
   parseJSON (Number 38400)  = return B'38400
   parseJSON (Number 57600)  = return B'57600
   parseJSON (Number 115200) = return B'115200
-  parseJSON _               = mzero
+  parseJSON (Number x)      = fail (show x ++ " is not a valid baud rate")
+  parseJSON v = typeMismatch "BaudRate" v
 
-instance ToJSON Priority where
-  toJSON Prefer   = String "prefer"
-  toJSON Normal   = String "normal"
-  toJSON NoSelect = String "noSelect"
+instance ToJSON Segment where
+  toJSON Seg0 = Number 0
+  toJSON Seg1 = Number 1
+  toJSON Seg2 = Number 2
+  toJSON Seg3 = Number 3
 
-instance FromJSON Priority where
-  parseJSON (String "prefer")   = return Prefer
-  parseJSON (String "normal")   = return Normal
-  parseJSON (String "noSelect") = return NoSelect
-  parseJSON _                   = mzero
+instance FromJSON Segment where
+  parseJSON (Number 0) = return Seg0
+  parseJSON (Number 1) = return Seg1
+  parseJSON (Number 2) = return Seg2
+  parseJSON (Number 3) = return Seg3
+  parseJSON (Number x) = fail ("expected segment index between 0-3, was " ++ show x)
+  parseJSON v = typeMismatch "Segment" v
+
+instance ToJSON RefId where
+  toJSON (RefId a b c d) = String (T.pack [a,b,c,d])
+
+instance FromJSON RefId where
+  parseJSON (String refid) = let i = T.index (refid `T.append` "    ")
+                             in return $ RefId (i 0) (i 1) (i 2) (i 3)
+  parseJSON v = typeMismatch "RefId" v
 
 ------------------------------------------------------------------------
 -- /data
@@ -243,12 +276,12 @@ takeData n xs master = toJSON $ map (takeServerData n master) xs
 takeServerData :: Int -> Master -> Server -> Value
 takeServerData n master svr = object [
       "name"     .= svrName svr
-    , "isMaster" .= toJSON (svrSockAddr svr == svrSockAddr master)
+    , "isMaster" .= (svrSockAddr svr == svrSockAddr master)
     , "stratum"  .= svrStratum svr
     , "refid"    .= B.unpack (svrRefId svr)
-    , "times"    .= toJSON utcTimes
-    , "offsets"  .= toJSON offsets
-    , "delays"   .= toJSON delays
+    , "times"    .= utcTimes
+    , "offsets"  .= offsets
+    , "delays"   .= delays
     ]
   where
     samples = U.take n (svrRawSamples svr)
