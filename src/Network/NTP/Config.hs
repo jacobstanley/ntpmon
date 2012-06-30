@@ -21,7 +21,7 @@ module Network.NTP.Config (
 
 import           Control.Applicative ((<$>))
 import           Data.Bits ((.&.))
-import           Data.Maybe (catMaybes)
+import           Data.Maybe (catMaybes, isJust, fromJust)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Read as T
@@ -66,24 +66,24 @@ readConfig path = parseConfig <$> T.readFile path
 parseConfig :: T.Text -> [ServerConfig]
 parseConfig txt = map fudges servers
   where
-    servers = decode "server" server
+    servers = catMaybes (decode "server" server)
     fudges  = foldl (.) id (decode "fudge" fudge)
 
     lines = map T.stripStart (T.lines txt)
-    decode typ go = map go
-                  $ filter (not . null)
-                  $ map (drop 1 . T.words)
-                  $ filter (typ `T.isPrefixOf`)
+    decode typ go = map (go . fromJust)
+                  $ filter isJust
+                  $ map (T.stripPrefix typ)
                   $ lines
 
-server :: [T.Text] -> ServerConfig
-server [] = error "server: tried to decode blank server entry"
-server (host:mods)
-    | elem "prefer" mods   = cfg { cfgPriority = Prefer }
-    | elem "noselect" mods = cfg { cfgPriority = NoSelect }
-    | otherwise            = cfg
+server :: T.Text -> Maybe ServerConfig
+server (T.strip -> line)
+    | T.null line          = Nothing
+    | elem "prefer" mods   = Just $ cfg { cfgPriority = Prefer }
+    | elem "noselect" mods = Just $ cfg { cfgPriority = NoSelect }
+    | otherwise            = Just cfg
   where
     cfg = ServerConfig Normal (driver host mods)
+    (host:mods) = T.words line
 
 driver :: HostName -> [T.Text] -> Driver
 driver host mods = case host of
@@ -99,11 +99,14 @@ driver host mods = case host of
 
 type Fudge = ServerConfig -> ServerConfig
 
-fudge :: [T.Text] -> Fudge
-fudge []          cfg                 = cfg
-fudge (host:mods) cfg | host /= host' = cfg
-                      | otherwise     = cfg'
+fudge :: T.Text -> Fudge
+fudge (T.strip -> line) cfg
+    | T.null line   = cfg
+    | host /= host' = cfg
+    | otherwise     = cfg'
   where
+    (host:mods) = T.words line
+
     host'  = driverHost (cfgDriver cfg)
     cfg'   = cfg { cfgDriver = update (cfgDriver cfg) }
 
