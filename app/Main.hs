@@ -88,11 +88,12 @@ updateConfig state cfg = do
         writeTVar (svcConfig state) cfg
         modifyTVar' (svcServers state) (force . mergeServers servers)
   where
-    hosts = ["localhost"] ++ catMaybes (map hostName cfg)
+    hosts = ["localhost"] ++ catMaybes (map cfgHostName cfg)
     clock = svcClock0 state
 
-    hostName (ServerConfig _ (UDP x)) = Just x
-    hostName _                        = Nothing
+cfgHostName :: ServerConfig -> Maybe HostName
+cfgHostName (ServerConfig _ (UDP x)) = Just x
+cfgHostName _                        = Nothing
 
 updateData :: ServiceState -> [Server] -> STM ()
 updateData state servers =
@@ -265,16 +266,17 @@ getData :: Int -> ServiceState -> ResourceT IO Response
 getData n state = do
     body <- atomically $ do
         servers <- readTVar (svcServers state)
-        return $ takeData n servers (findMaster servers)
+        return $ takeData n (findMaster servers) servers
 
     return (responseJSON status200 [] body)
 
-takeData :: Int -> [Server] -> Master -> Value
-takeData n xs master = toJSON $ map (takeServerData n master) xs
+takeData :: Int -> Master -> [Server] -> Value
+takeData n master = toJSON . map (takeServerData n master)
 
 takeServerData :: Int -> Master -> Server -> Value
 takeServerData n master svr = object [
       "name"     .= svrName svr
+    , "hostName" .= svrHostName svr
     , "isMaster" .= (svrSockAddr svr == svrSockAddr master)
     , "stratum"  .= svrStratum svr
     , "refid"    .= B.unpack (svrRefId svr)
