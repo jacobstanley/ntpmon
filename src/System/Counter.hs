@@ -14,10 +14,10 @@ import Control.Monad (replicateM)
 import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime)
 import Data.Word (Word64)
 
-#ifdef QPC
-import System.Win32.Time (queryPerformanceCounter, queryPerformanceFrequency)
-#else
+#ifdef TSC
 import System.CPUTime.Rdtsc (rdtsc)
+#else
+import System.Win32.Time (queryPerformanceCounter, queryPerformanceFrequency)
 #endif
 
 ------------------------------------------------------------------------
@@ -34,10 +34,10 @@ data CounterInfo = CounterInfo {
 -- on the system.
 readCounter :: IO Word64
 
-#ifdef QPC
-readCounter = fromIntegral `fmap` queryPerformanceCounter
-#else
+#ifdef TSC
 readCounter = rdtsc
+#else
+readCounter = fromIntegral `fmap` queryPerformanceCounter
 #endif
 
 
@@ -45,10 +45,10 @@ readCounter = rdtsc
 -- precision.
 analyzeCounter :: IO CounterInfo
 analyzeCounter = do
-#ifdef QPC
-    cntFrequency <- fromIntegral `fmap` queryPerformanceFrequency
-#else
+#ifdef TSC
     cntFrequency <- analyzeFrequency 5
+#else
+    cntFrequency <- fromIntegral `fmap` queryPerformanceFrequency
 #endif
     cntPrecision <- analyzePrecision
     return CounterInfo{..}

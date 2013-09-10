@@ -50,7 +50,7 @@ utc0 = UTCTime (ModifiedJulianDay 0) (secondsToDiffTime 0)
 
 writeRecord :: RecordLogger -> UTCTime -> Headers -> Record -> IO ()
 writeRecord RecordLogger{..} time headers record = do
-    mfile <- modifyIORef' logFile updateFile
+    mfile <- modifyIORefIO logFile updateFile
     case mfile of
         Just f  -> writeUtf8 (fileHandle f) record
         Nothing -> return ()
@@ -127,8 +127,8 @@ fILE_APPEND_DATA = 4
 fILE_SHARE_DELETE :: ShareMode
 fILE_SHARE_DELETE = 4
 
-modifyIORef' :: IORef a -> (a -> IO (a, b)) -> IO b
-modifyIORef' ref io = do
+modifyIORefIO :: IORef a -> (a -> IO (a, b)) -> IO b
+modifyIORefIO ref io = do
     x  <- readIORef ref
     (x',r) <- io x
     writeIORef ref x'

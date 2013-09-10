@@ -340,7 +340,7 @@ packTime i f = Time (pack i f)
 unpackTime :: Time -> (Word32, Word32)
 unpackTime (Time t) = unpack t
 
-pack :: (Integral i, Bits p) => i -> Word32 -> p
+pack :: (Integral i, Bits p, Num p) => i -> Word32 -> p
 pack int frac = (fromIntegral int `shiftL` 32) .|. fromIntegral frac
 
 unpack :: (Integral p, Bits p, Num i) => p -> (i, Word32)

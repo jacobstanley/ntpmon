@@ -25,7 +25,6 @@ import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Data.Aeson
 import           Data.Aeson.Encode
 import           Data.Aeson.Types (typeMismatch)
-import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit (ResourceT, ($$))
@@ -48,7 +47,7 @@ import           Network (withSocketsDo)
 import           Network.HTTP.Types
 import           Network.Socket (SockAddr(..), PortNumber(..))
 import           Network.Wai
-import           Network.Wai.Application.Static hiding (FilePath)
+import           Network.Wai.Application.Static
 import           Network.Wai.Handler.Warp
 import           System.IO
 import           System.Locale (defaultTimeLocale)
@@ -146,7 +145,7 @@ httpServer state req = case (requestMethod req, pathInfo req) of
     _                         -> static req
   where
     go f   = f state
-    static = staticApp defaultWebAppSettings
+    static = staticApp (defaultWebAppSettings "static")
 
 ------------------------------------------------------------------------
 -- /servers
@@ -275,21 +274,23 @@ takeData n master = toJSON . map (takeServerData n master)
 
 takeServerData :: Int -> Master -> Server -> Value
 takeServerData n master svr = object [
-      "name"     .= svrName svr
-    , "hostName" .= svrHostName svr
-    , "isMaster" .= (svrSockAddr svr == svrSockAddr master)
-    , "stratum"  .= svrStratum svr
-    , "refid"    .= B.unpack (svrRefId svr)
-    , "times"    .= utcTimes
-    , "offsets"  .= offsets
-    , "delays"   .= delays
+      "name"          .= svrName svr
+    , "hostName"      .= svrHostName svr
+    , "isMaster"      .= (svrSockAddr svr == svrSockAddr master)
+    , "stratum"       .= svrStratum svr
+    , "refid"         .= B.unpack (svrRefId svr)
+    , "times"         .= utcTimes
+    , "offsets"       .= offsets
+    , "networkDelays" .= netDelays
+    , "serverDelays"  .= srvDelays
     ]
   where
     samples = U.take n (svrRawSamples svr)
 
-    clock    = svrClock master
-    offsets  = U.map (toSeconds . offset clock) samples :: U.Vector Double
-    delays   = U.map (toSeconds . networkDelay clock) samples :: U.Vector Double
+    clock     = svrClock master
+    offsets   = U.map (toSeconds . offset clock) samples :: U.Vector Double
+    netDelays = U.map (toSeconds . networkDelay clock) samples :: U.Vector Double
+    srvDelays = U.map (toSeconds . serverDelay) samples :: U.Vector Double
 
     times    = U.map (localTime clock) samples :: U.Vector Time
     utcTimes = V.map toUTCTime (V.convert times) :: V.Vector UTCTime
@@ -391,15 +392,16 @@ csvRecord utc master xs | empty     = Nothing
     empty = all (U.null . svrRawSamples) xs
 
     record = T.intercalate "," fields `T.append` "\r\n"
-    fields = [time] ++ offsets ++ delays ++ [masterName]
+    fields = [time] ++ offsets ++ netDelays ++ srvDelays ++ [masterName]
 
     time       = T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc)
     masterName = T.pack (svrName master)
 
-    samples = map ((U.!? 0) . svrRawSamples) xs
-    offsets = map (maybe "" $ showMilli . toSeconds . offset clock) samples
-    delays  = map (maybe "" $ showMilli . fromDiff clock . roundtrip) samples
-    clock   = svrClock master
+    samples   = map ((U.!? 0) . svrRawSamples) xs
+    offsets   = map (maybe "" $ showMilli . toSeconds . offset clock) samples
+    netDelays = map (maybe "" $ showMilli . toSeconds . networkDelay clock) samples
+    srvDelays = map (maybe "" $ showMilli . toSeconds . serverDelay) samples
+    clock     = svrClock master
 
 csvHeaders :: [Server] -> Maybe T.Text
 csvHeaders [] = Nothing
@@ -409,6 +411,7 @@ csvHeaders xs = Just $ T.intercalate "," headers `T.append` "\r\n"
     headers = ["UTC Time"]
            ++ map (\x -> T.concat [x, " vs UTC (ms)"]) names
            ++ map (\x -> T.concat ["Network Delay to ", x, " (ms)"]) names
+           ++ map (\x -> T.concat ["Server Delay of ", x, " (ms)"]) names
            ++ ["Master"]
 
 showMilli :: Seconds -> T.Text
@@ -432,8 +435,5 @@ readTVarIO = liftIO . STM.readTVarIO
 
 deriving instance NFData Time
 deriving instance NFData PortNumber
-
-instance NFData ByteString
-instance U.Unbox a => NFData (U.Vector a)
 
 $(deriveNFDatas [''SockAddr, ''Clock, ''Server])
